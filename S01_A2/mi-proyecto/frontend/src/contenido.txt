@@ -1,0 +1,9 @@
+Carpeta: frontend/src/
+
+Contendrá el código fuente de la aplicación React, incluyendo:
+- Componentes de interfaz reutilizables, con tamaño de texto y etiquetas pensadas para adultos mayores (RNF-06)
+- Páginas/vistas (ej. login con segundo factor, lista de pacientes, carga de documentos, chat, compartir acceso, registro de accesos)
+- Hooks personalizados (ej. selección de paciente activo, subida de archivos desde cámara del celular)
+- Servicios de conexión con la API del backend
+- Estilos (CSS/SCSS o librería de componentes), responsive para celular y escritorio
+- Configuración de rutas de la aplicación

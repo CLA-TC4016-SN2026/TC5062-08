@@ -1,0 +1,8 @@
+Carpeta: docs/
+
+Contendrá la documentación del proyecto, incluyendo:
+- Decisiones de arquitectura y stack tecnológico (stack_decision.md)
+- SRS, criterios de aceptación Given-When-Then y su trazabilidad hacia endpoints y pruebas
+- Diagramas (arquitectura, modelo de datos, casos de uso)
+- Especificación/contrato de la API (referencia a la documentación OpenAPI generada por FastAPI, con IDs RF-XX-AC-Y)
+- Notas sobre alineación con protección de datos personales y manejo de datos ficticios de prueba
