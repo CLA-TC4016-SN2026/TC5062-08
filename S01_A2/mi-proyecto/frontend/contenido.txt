@@ -1,0 +1,8 @@
+Carpeta: frontend/
+
+Contendrá el proyecto de frontend (React + Vite), incluyendo:
+- Archivos de configuración del proyecto (package.json, vite.config.js)
+- Dockerfile del frontend
+- Archivo de variables de entorno de ejemplo (.env.example)
+- Archivos estáticos públicos (public/)
+- La carpeta src/ con el código fuente de la aplicación

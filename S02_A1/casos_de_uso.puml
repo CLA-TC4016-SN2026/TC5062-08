@@ -1,0 +1,38 @@
+@startuml diagrama_casos_uso_RepoSalud
+left to right direction
+skinparam packageStyle rectangle
+skinparam actorStyle awesome
+skinparam usecase {
+  BackgroundColor #F5F9FF
+  BorderColor #33638A
+}
+title Casos de uso — Requerimientos Funcionales principales de RepoSalud
+
+actor "Paciente" as Pac
+actor "Cuidador / Familiar" as Cui
+actor "Farmacia u otro\ntercero no médico" as Farm
+
+Cui --|> Pac
+
+rectangle "RepoSalud" {
+  usecase "Cargar documento médico\n(RF-01)" as UC1
+  usecase "Consultar documento\nhistórico (RF-02)" as UC2
+  usecase "Buscar documento mediante\nlenguaje natural (RF-03)" as UC3
+  usecase "Ver otras opciones de\ncoincidencia (RF-04)" as UC4
+  usecase "Consultar respuesta citando\ndocumento fuente (RF-05)" as UC5
+  usecase "Compartir documento puntual\ncon tercero (RF-06)" as UC6
+  usecase "Configurar cuenta asistida\n/ onboarding (RF-07)" as UC7
+}
+
+Pac --> UC1
+Pac --> UC2
+Pac --> UC3
+Pac --> UC5
+Pac --> UC6
+Cui --> UC7
+
+UC4 ..> UC3 : <<extend>>
+UC5 ..> UC3 : <<include>>
+UC6 --> Farm
+
+@enduml

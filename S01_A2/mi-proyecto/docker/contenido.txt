@@ -1,0 +1,6 @@
+Carpeta: docker/
+
+Contendrá los archivos de orquestación y configuración de contenedores, incluyendo:
+- docker-compose.yml (servicios de backend, frontend y base de datos PostgreSQL con la extensión pgvector)
+- Archivos de configuración adicionales por servicio (ej. variables de entorno compartidas, claves de cifrado de ejemplo)
+- Scripts de inicialización de la base de datos (extensión pgvector, políticas de Row-Level Security)

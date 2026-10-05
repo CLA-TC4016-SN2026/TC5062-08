@@ -1,0 +1,9 @@
+Carpeta: backend/src/
+
+Contendrá el código fuente de la aplicación FastAPI, incluyendo:
+- Punto de entrada de la aplicación (main.py)
+- Rutas/endpoints de la API (routers): cuentas, pacientes, documentos, chat, accesos compartidos, registro de accesos
+- Modelos de base de datos (ORM), incluyendo la extensión pgvector para embeddings
+- Esquemas de validación de datos (Pydantic)
+- Lógica de negocio y servicios (ej. pipeline de OCR, generación de embeddings, orquestación del chat/RAG, cifrado de archivos, envío de OTP)
+- Conexión y configuración de la base de datos
