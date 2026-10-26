@@ -62,7 +62,7 @@ def assert_database_ready() -> None:
         raise RuntimeError(
             "Faltan tablas del esquema RepoSalud: "
             + ", ".join(sorted(missing_tables))
-            + ". Importa S04_A3/esquema_bd.sql antes de iniciar la API."
+            + ". Importa S05_S06_A1/esquema_bd.sql antes de iniciar la API."
         )
     if "PostgreSQL" not in version:
         raise RuntimeError("La base configurada no es PostgreSQL.")

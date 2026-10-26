@@ -123,6 +123,7 @@ CREATE TABLE repositorios (
     autorizacion_declarada_por_cuenta_id uuid
         REFERENCES cuentas (id) ON DELETE RESTRICT,
     creado_en timestamptz NOT NULL DEFAULT now(),
+    eliminado_en timestamptz,
     CONSTRAINT ck_repositorio_declaracion_autorizacion CHECK (
         (titular_es_operador
             AND autorizacion_declarada_en IS NULL
@@ -639,6 +640,10 @@ BEGIN
         WHERE r.titular_paciente_id = OLD.id
           AND (
               (r.titular_es_operador
+                  AND EXISTS (
+                      SELECT 1 FROM cuentas AS c
+                      WHERE c.id = r.operador_cuenta_id AND c.tipo = 'paciente'
+                  )
                   AND NEW.cuenta_id IS DISTINCT FROM r.operador_cuenta_id)
               OR
               (NOT r.titular_es_operador
@@ -672,8 +677,12 @@ BEGIN
             USING ERRCODE = '23514';
     END IF;
     IF NEW.titular_es_operador
-        AND (tipo_operador <> 'paciente' OR cuenta_titular IS DISTINCT FROM NEW.operador_cuenta_id) THEN
-        RAISE EXCEPTION 'El titular-operador debe ser la cuenta paciente titular'
+        AND (
+            tipo_operador = 'medico'
+            OR (tipo_operador = 'paciente' AND cuenta_titular IS DISTINCT FROM NEW.operador_cuenta_id)
+            OR (tipo_operador = 'cuidador' AND cuenta_titular IS NOT NULL)
+        ) THEN
+        RAISE EXCEPTION 'La cuenta operadora debe coincidir con la titularidad del repositorio'
             USING ERRCODE = '23514';
     END IF;
     IF NOT NEW.titular_es_operador

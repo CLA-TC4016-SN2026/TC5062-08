@@ -1,6 +1,6 @@
 # Backend CRUD de RepoSalud
 
-API de desarrollo con Python 3.11+, FastAPI y PostgreSQL + pgvector. Las rutas, métodos, IDs de operación y respuestas se derivan de `S04_A3/openapi_equipo.yaml`; las tablas se crean ejecutando `S04_A3/esquema_bd.sql` desde la raíz del repositorio (por ejemplo, `psql -h localhost -U postgres -d repossalud -f S04_A3/esquema_bd.sql`).
+API de desarrollo con Python 3.11+, FastAPI y PostgreSQL + pgvector. Las rutas, métodos, IDs de operación y respuestas se derivan de `S04_A3/openapi_equipo.yaml`; las tablas se crean ejecutando `S05_S06_A1/esquema_bd.sql` desde la raíz del repositorio (por ejemplo, `psql -h localhost -U postgres -d repossalud -f S05_S06_A1/esquema_bd.sql`).
 
 ## Preparar y ejecutar
 
