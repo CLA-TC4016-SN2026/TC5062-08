@@ -1,0 +1,9 @@
+Carpeta: backend/
+
+Contendrá el proyecto de backend (FastAPI + Python), incluyendo:
+- Archivos de configuración de dependencias (requirements.txt o pyproject.toml)
+- Dockerfile del backend
+- Archivo de variables de entorno de ejemplo (.env.example)
+- Configuración y scripts de migraciones de base de datos (Alembic)
+- Pruebas automatizadas del backend (tests/), nombradas según los IDs RF-XX-AC-Y de la SRS
+- La carpeta src/ con el código fuente de la aplicación

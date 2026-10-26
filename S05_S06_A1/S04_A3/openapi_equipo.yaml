@@ -1,0 +1,2075 @@
+openapi: 3.0.3
+info:
+  title: RepoSalud API - Contrato del equipo
+  version: 1.0.0
+  description: Contrato REST compartido propuesto a partir de los tres OpenAPI individuales y S03_A1/SRS_equipo.md.
+    Las decisiones y diferencias se documentan en S04_A3/diferencias_openapi.md. Las rutas y mensajes se mantienen
+    en espanol. Cada operacion declara x-acceptance-criteria con IDs del SRS del equipo.
+  contact:
+    name: Equipo RepoSalud
+  license:
+    name: Código abierto (por definir)
+servers:
+- url: http://localhost:8000/api/v1
+  description: Desarrollo local
+tags:
+- name: Cuentas y sesión
+  description: Registro, verificación, inicio de sesión con segundo factor y recuperación de acceso.
+- name: Repositorio
+  description: Alta y configuración del repositorio del paciente.
+- name: Documentos
+  description: Carga, confirmación, consulta, visualización, corrección y eliminación de documentos.
+- name: Búsqueda
+  description: Búsqueda en lenguaje natural y otras coincidencias.
+- name: Vinculaciones
+  description: Acceso temporal y revocable del médico tratante.
+- name: ARCO
+  description: Derechos de acceso (exportación) y cancelación/oposición (eliminación del historial).
+security:
+- bearerAuth: []
+x-criterios-transversales:
+  descripcion: 'Criterios que se cumplen en el middleware único de autenticación/autorización y se verifican contra
+    cualquier endpoint privado; se listan además en las operaciones donde son más representativos.
+
+    '
+  criterios:
+  - RF-03-AC-1
+  - RF-03-AC-2
+  - RF-05-AC-1
+  - RF-05-AC-3
+  - RF-05-AC-4
+paths:
+  /auth/desafios:
+    post:
+      tags:
+      - Cuentas y sesión
+      operationId: solicitarDesafioCodigo
+      summary: Paso 1 del inicio de sesión — crear un desafío con correo y contraseña (envía el código de un solo
+        uso al correo)
+      description: Valida correo y contraseña y envía al correo un código de 6 dígitos con vencimiento. Tras 5 contraseñas
+        incorrectas seguidas la cuenta se bloquea 15 minutos (429).
+      security: []
+      x-acceptance-criteria:
+      - RF-01-AC-5
+      - RF-01-AC-6
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '201':
+          description: Desafío creado; credenciales válidas y código enviado al correo.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DesafioCodigo'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: Credenciales inválidas (no revela cuál dato falló) o cuenta sin verificar.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                codigo: credenciales_invalidas
+                mensaje: Correo o contraseña incorrectos
+        '429':
+          description: Cuenta bloqueada 15 minutos tras 5 contraseñas incorrectas seguidas, aun con la contraseña
+            correcta (RNF-05).
+          headers:
+            Retry-After:
+              description: Segundos restantes de bloqueo.
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/ServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /auth/sesiones:
+    post:
+      tags:
+      - Cuentas y sesión
+      operationId: crearSesion
+      summary: Paso 2 del inicio de sesión — crear la sesión con el código de un solo uso (emite el JWT)
+      description: Canjea el código de un solo uso del desafío por el JWT de la sesión. El código queda marcado
+        como usado.
+      security: []
+      x-acceptance-criteria:
+      - RF-01-AC-4
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginCodigoRequest'
+      responses:
+        '201':
+          description: Sesión creada (inicio de sesión completado).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenSesion'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: Código incorrecto, vencido o ya usado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Demasiados intentos o cuenta bloqueada.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /auth/recuperaciones:
+    post:
+      tags:
+      - Cuentas y sesión
+      operationId: solicitarRecuperacion
+      summary: Solicitar enlace de recuperación de contraseña
+      description: Responde siempre lo mismo, exista o no la cuenta, y solo envía correo si existe (no revela cuentas).
+      security: []
+      x-acceptance-criteria:
+      - RF-02-AC-1
+      - RF-02-AC-3
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - correo
+              properties:
+                correo:
+                  type: string
+                  format: email
+      responses:
+        '202':
+          description: Solicitud aceptada (el correo se envía de forma asíncrona). Si el correo corresponde a una
+            cuenta, recibirá un enlace de un solo uso válido por 30 minutos.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Mensaje'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /auth/recuperaciones/restablecimiento:
+    post:
+      tags:
+      - Cuentas y sesión
+      operationId: restablecerContrasena
+      summary: Definir una contraseña nueva con el enlace de recuperación
+      description: Define la contraseña nueva con el enlace de recuperación, que es de un solo uso y vale 30 minutos.
+      security: []
+      x-acceptance-criteria:
+      - RF-02-AC-1
+      - RF-02-AC-2
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - token
+              - contrasenaNueva
+              properties:
+                token:
+                  type: string
+                contrasenaNueva:
+                  type: string
+                  format: password
+                  minLength: 10
+      responses:
+        '200':
+          description: Contraseña actualizada.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Mensaje'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: Enlace ya usado o con más de 30 minutos; la contraseña no cambia.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /repositorios:
+    post:
+      tags:
+      - Repositorio
+      operationId: crearRepositorio
+      summary: Crear el repositorio del paciente y su configuración inicial
+      description: 'Solo cuentas de tipo paciente o cuidador. Cada cuenta administra un único repositorio. Si el
+        titular es otra persona se exige la declaración de autorización; queda registrada con fecha, hora y usuario.
+        El cuidador puede completar en nombre del titular la configuración inicial (preferencias de tamaño de texto).
+
+        '
+      x-acceptance-criteria:
+      - RF-04-AC-1
+      - RF-04-AC-2
+      - RF-04-AC-3
+      - RF-04-AC-4
+      - RF-04-AC-5
+      - RF-04-AC-6
+      - RF-05-AC-3
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RepositorioCrear'
+      responses:
+        '201':
+          description: Repositorio creado.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Repositorio'
+        '400':
+          description: Datos invalidos, declaracion de autorizacion faltante o la cuenta ya tiene un repositorio.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /repositorios/mio:
+    get:
+      tags:
+      - Repositorio
+      operationId: obtenerMiRepositorio
+      summary: Obtener el repositorio que administra la cuenta autenticada
+      description: Atajo para la cuenta autenticada, que administra un único repositorio. Responde 404 si todavía
+        no lo ha creado.
+      x-acceptance-criteria:
+      - RF-04-AC-1
+      - RF-05-AC-1
+      - RF-05-AC-4
+      responses:
+        '200':
+          description: Repositorio de la cuenta.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Repositorio'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: La cuenta todavía no tiene repositorio.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/ServerError'
+    patch:
+      tags:
+      - Repositorio
+      operationId: actualizarPreferenciasRepositorio
+      summary: Actualizar la configuración del repositorio (tamaño de texto)
+      description: Actualiza la configuración del repositorio de la cuenta autenticada. Es idempotente, porque reenviar
+        el mismo valor no cambia el estado.
+      x-acceptance-criteria:
+      - RF-04-AC-5
+      - RF-05-AC-3
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                tamanoTexto:
+                  $ref: '#/components/schemas/TamanoTexto'
+      responses:
+        '200':
+          description: Configuración actualizada.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Repositorio'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /repositorios/{repositorioId}:
+    get:
+      tags:
+      - Repositorio
+      operationId: obtenerRepositorio
+      summary: Obtener un repositorio por su identificador
+      description: URI que devuelve `Location` al crear el repositorio. Solo el administrador del repositorio puede
+        consultarlo.
+      x-acceptance-criteria:
+      - RF-04-AC-1
+      - RF-05-AC-1
+      - RF-05-AC-4
+      parameters:
+      - $ref: '#/components/parameters/RepositorioId'
+      responses:
+        '200':
+          description: Repositorio.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Repositorio'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+    delete:
+      tags:
+      - ARCO
+      operationId: eliminarHistorial
+      summary: Eliminar el historial completo del paciente (documentos, metadatos y vinculaciones)
+      description: 'Requiere escribir el nombre del titular para confirmar (la aplicación ofrece exportar antes,
+        ver `GET /repositorios/{repositorioId}/exportacion`). Las vinculaciones quedan revocadas, toda petición
+        posterior recibe 404 y los archivos se purgan del almacenamiento y de las copias de seguridad en 30 días
+        (RNF-20). Idempotente en su efecto: repetir la llamada no cambia el estado (la repetición recibe 404).
+
+        '
+      x-acceptance-criteria:
+      - RF-16-AC-1
+      - RF-16-AC-2
+      - RF-16-AC-3
+      - RF-16-AC-4
+      - RF-05-AC-3
+      parameters:
+      - $ref: '#/components/parameters/RepositorioId'
+      - name: Confirmacion-Nombre
+        in: header
+        required: true
+        description: 'Nombre completo del titular, escrito por el usuario como confirmación, codificado en UTF-8
+          y porcentual (RFC 3986) para admitir acentos. Va en encabezado y no en la URL para que el nombre (dato
+          personal asociado a datos de salud) no quede en registros de acceso ni en el historial del navegador.
+
+          '
+        schema:
+          type: string
+      responses:
+        '204':
+          description: Historial eliminado.
+        '400':
+          description: El nombre de confirmación no coincide con el del titular.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /repositorios/{repositorioId}/documentos:
+    parameters:
+    - $ref: '#/components/parameters/RepositorioId'
+    post:
+      tags:
+      - Documentos
+      operationId: subirDocumento
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      summary: Subir un documento (JPG, PNG o PDF de hasta 10 MB)
+      description: 'Solo paciente o cuidador. El único campo obligatorio es el archivo. El documento queda en estado
+        `pendiente_confirmacion` y el sistema intenta detectar fecha y tipo (sugerencias). Si el proveedor de IA
+        falla, la carga igualmente se acepta y las sugerencias vienen nulas (`deteccionDisponible: false`) para
+        que la aplicación muestre el selector manual (RF-07-AC-6).
+
+        '
+      x-acceptance-criteria:
+      - RF-06-AC-1
+      - RF-06-AC-2
+      - RF-06-AC-3
+      - RF-06-AC-4
+      - RF-06-AC-5
+      - RF-06-AC-6
+      - RF-06-AC-7
+      - RF-07-AC-5
+      - RF-07-AC-6
+      - RF-05-AC-3
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+              - archivo
+              properties:
+                archivo:
+                  type: string
+                  format: binary
+                  description: JPG, PNG o PDF (una o varias páginas), máximo 10 MB.
+      responses:
+        '201':
+          description: Documento creado en estado pendiente de confirmación.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Documento'
+        '400':
+          description: Formato no admitido ("Solo se aceptan fotos (JPG o PNG) y archivos PDF").
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          description: El archivo supera los 10 MB.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                codigo: archivo_demasiado_grande
+                mensaje: El archivo supera los 10 MB
+        '500':
+          $ref: '#/components/responses/ServerError'
+    get:
+      tags:
+      - Documentos
+      operationId: listarDocumentos
+      summary: Listar los documentos del repositorio
+      description: 'Paciente/cuidador: ven todos (los pendientes solo con `estado=pendiente_confirmacion`). Médico:
+        solo los documentos confirmados que cumplan el alcance de su vinculación vigente; con la vinculación pendiente,
+        vencida, revocada o desvinculada responde 403 (comparación de la hora de la petición con el vencimiento,
+        sin tolerancia). Orden por defecto: `fechaDocumento` descendente (el más reciente primero) y, a igual fecha
+        o para los pendientes, que no tienen fecha, `subidoEn` descendente.
+
+        '
+      x-acceptance-criteria:
+      - RF-09-AC-1
+      - RF-09-AC-2
+      - RF-09-AC-3
+      - RF-09-AC-4
+      - RF-13-AC-1
+      - RF-13-AC-3
+      - RF-03-AC-1
+      - RF-12-AC-14
+      - RF-14-AC-1
+      - RF-14-AC-2
+      - RF-14-AC-3
+      - RF-14-AC-5
+      - RF-14-AC-6
+      parameters:
+      - name: estado
+        in: query
+        schema:
+          $ref: '#/components/schemas/EstadoDocumento'
+        description: Por defecto `confirmado`. Solo paciente/cuidador pueden pedir pendientes.
+      - name: tipo
+        in: query
+        schema:
+          $ref: '#/components/schemas/TipoDocumento'
+      - name: desde
+        in: query
+        schema:
+          type: string
+          format: date
+      - name: hasta
+        in: query
+        schema:
+          type: string
+          format: date
+      - $ref: '#/components/parameters/Pagina'
+      - $ref: '#/components/parameters/TamanoPagina'
+      responses:
+        '200':
+          description: Lista de documentos (estado vacío = lista vacía).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentoPagina'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /repositorios/{repositorioId}/documentos/{documentoId}:
+    parameters:
+    - $ref: '#/components/parameters/RepositorioId'
+    - $ref: '#/components/parameters/DocumentoId'
+    get:
+      tags:
+      - Documentos
+      operationId: obtenerDocumento
+      summary: Obtener los metadatos de un documento
+      description: Devuelve los metadatos, no el archivo. El médico solo accede a documentos dentro del alcance
+        de su vinculación vigente.
+      x-acceptance-criteria:
+      - RF-09-AC-2
+      - RF-03-AC-2
+      - RF-13-AC-2
+      - RF-12-AC-14
+      - RF-14-AC-1
+      - RF-14-AC-2
+      - RF-14-AC-5
+      responses:
+        '200':
+          description: Metadatos del documento.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Documento'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+    patch:
+      tags:
+      - Documentos
+      operationId: corregirMetadatos
+      summary: Corregir fecha y/o tipo de un documento confirmado (rectificación)
+      description: 'No modifica el archivo original (RNF-08). Cada cambio añade una entrada al historial de cambios.
+        Es idempotente: reenviar los mismos valores no cambia el estado ni añade entradas al historial.
+
+        '
+      x-acceptance-criteria:
+      - RF-08-AC-1
+      - RF-08-AC-3
+      - RF-08-AC-4
+      - RF-07-AC-2
+      - RF-05-AC-3
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MetadatosCorreccion'
+      responses:
+        '200':
+          description: Metadatos actualizados.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Documento'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+    delete:
+      tags:
+      - Documentos
+      operationId: eliminarDocumento
+      summary: Eliminar un documento individual
+      description: 'Irreversible (la aplicación pide confirmación y advierte). Desaparece de la lista, de la búsqueda
+        y de las vinculaciones que lo incluían; toda petición posterior recibe 404. El archivo se purga en 30 días
+        (RNF-20). Idempotente en su efecto: repetir la llamada no cambia el estado (la repetición recibe 404).
+
+        '
+      x-acceptance-criteria:
+      - RF-16-AC-5
+      - RF-16-AC-6
+      - RF-16-AC-7
+      - RF-16-AC-8
+      - RF-05-AC-3
+      responses:
+        '204':
+          description: Documento eliminado.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /repositorios/{repositorioId}/documentos/{documentoId}/confirmacion:
+    put:
+      tags:
+      - Documentos
+      operationId: confirmarDocumento
+      summary: Confirmar fecha y tipo; el documento pasa a `confirmado`
+      description: Fecha y tipo son obligatorios (los detectados o los elegidos). Solo entonces aparece en la lista
+        y la búsqueda.
+      x-acceptance-criteria:
+      - RF-07-AC-1
+      - RF-07-AC-2
+      - RF-07-AC-3
+      - RF-07-AC-4
+      - RF-05-AC-3
+      parameters:
+      - $ref: '#/components/parameters/RepositorioId'
+      - $ref: '#/components/parameters/DocumentoId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MetadatosCorreccionCompleta'
+      responses:
+        '200':
+          description: Documento confirmado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Documento'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /repositorios/{repositorioId}/documentos/{documentoId}/historial-cambios:
+    get:
+      tags:
+      - Documentos
+      operationId: listarHistorialCambios
+      summary: Historial de correcciones de metadatos de un documento
+      description: Cada corrección de fecha o tipo deja una entrada con fecha y hora, usuario, campo y valor anterior.
+      x-acceptance-criteria:
+      - RF-08-AC-3
+      parameters:
+      - $ref: '#/components/parameters/RepositorioId'
+      - $ref: '#/components/parameters/DocumentoId'
+      responses:
+        '200':
+          description: Entradas de más reciente a más antigua.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CambioMetadato'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /repositorios/{repositorioId}/documentos/{documentoId}/contenido:
+    get:
+      tags:
+      - Documentos
+      operationId: visualizarDocumento
+      summary: Visualizar el documento dentro de la aplicación (inline, todas las páginas)
+      description: Disponible para paciente/cuidador y para el médico dentro de su alcance vigente.
+      x-acceptance-criteria:
+      - RF-09-AC-5
+      - RF-13-AC-2
+      - RF-14-AC-1
+      - RF-14-AC-2
+      - RF-14-AC-3
+      - RF-14-AC-5
+      - RF-14-AC-6
+      - RF-03-AC-2
+      parameters:
+      - $ref: '#/components/parameters/RepositorioId'
+      - $ref: '#/components/parameters/DocumentoId'
+      responses:
+        '200':
+          description: Contenido del documento para mostrarse en pantalla (encabezado Content-Disposition inline).
+          content:
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            image/png:
+              schema:
+                type: string
+                format: binary
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Sin permiso, documento fuera del alcance, o vinculación vencida/revocada ("Este acceso ya
+            no está disponible").
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /repositorios/{repositorioId}/documentos/{documentoId}/archivo:
+    get:
+      tags:
+      - Documentos
+      operationId: descargarArchivoOriginal
+      summary: Descargar el archivo original sin modificar
+      description: Solo paciente/cuidador. El médico no puede descargar (403). El hash SHA-256 coincide con el registrado
+        al subirlo.
+      x-acceptance-criteria:
+      - RF-09-AC-6
+      - RF-09-AC-7
+      - RF-08-AC-2
+      - RF-05-AC-3
+      parameters:
+      - $ref: '#/components/parameters/RepositorioId'
+      - $ref: '#/components/parameters/DocumentoId'
+      responses:
+        '200':
+          description: Archivo original (encabezado Content-Disposition attachment).
+          headers:
+            X-Content-SHA256:
+              description: Hash SHA-256 del archivo original.
+              schema:
+                type: string
+          content:
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            image/png:
+              schema:
+                type: string
+                format: binary
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /repositorios/{repositorioId}/vinculaciones:
+    parameters:
+    - $ref: '#/components/parameters/RepositorioId'
+    post:
+      tags:
+      - Vinculaciones
+      operationId: solicitarVinculacion
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      summary: Solicitar la vinculación de un médico tratante
+      description: 'Queda `pendiente_aceptacion`; el médico no ve ningún documento hasta aceptar. La vigencia (1–365
+        días o sin vencimiento) se cuenta desde la aceptación; una solicitud sin respuesta vence a los 7 días. Se
+        envía al médico un correo que solo contiene el enlace, el nombre de quien comparte y la vigencia (sin datos
+        del historial). Si el correo falla, la solicitud igual se crea con `avisoEnviado: false`.
+
+        '
+      x-acceptance-criteria:
+      - RF-12-AC-1
+      - RF-12-AC-2
+      - RF-12-AC-3
+      - RF-12-AC-4
+      - RF-12-AC-5
+      - RF-12-AC-6
+      - RF-12-AC-7
+      - RF-12-AC-8
+      - RF-12-AC-9
+      - RF-12-AC-10
+      - RF-05-AC-3
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VinculacionCrear'
+      responses:
+        '201':
+          description: Solicitud creada.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Vinculacion'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+    get:
+      tags:
+      - Vinculaciones
+      operationId: listarVinculaciones
+      summary: Lista de accesos otorgados, con su estado
+      description: 'Cada vinculación con su estado efectivo (pendiente de aceptación, vigente, vencida, revocada,
+        rechazada o cancelada) y su fecha de vencimiento. Las no vigentes no pueden reactivarse ni reutilizarse.
+
+        '
+      x-acceptance-criteria:
+      - RF-14-AC-4
+      - RF-12-AC-1
+      - RF-12-AC-10
+      - RF-12-AC-12
+      - RF-12-AC-13
+      - RF-12-AC-15
+      responses:
+        '200':
+          description: Vinculaciones del repositorio.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Vinculacion'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /repositorios/{repositorioId}/vinculaciones/{vinculacionId}:
+    get:
+      tags:
+      - Vinculaciones
+      operationId: obtenerVinculacion
+      summary: Consultar una vinculación y su estado efectivo
+      description: URI que devuelve `Location` al solicitar la vinculación.
+      x-acceptance-criteria:
+      - RF-14-AC-4
+      - RF-12-AC-10
+      parameters:
+      - $ref: '#/components/parameters/RepositorioId'
+      - $ref: '#/components/parameters/VinculacionId'
+      responses:
+        '200':
+          description: Vinculación.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Vinculacion'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /repositorios/{repositorioId}/vinculaciones/{vinculacionId}/reenvio-aviso:
+    post:
+      tags:
+      - Vinculaciones
+      operationId: reenviarAvisoVinculacion
+      summary: Reenviar el aviso por correo de una solicitud pendiente
+      description: Solo aplica a solicitudes pendientes. No es idempotente en su efecto, porque cada llamada envía
+        un correo, y responde 400 si la solicitud ya no está pendiente.
+      x-acceptance-criteria:
+      - RF-12-AC-10
+      - RF-12-AC-9
+      parameters:
+      - $ref: '#/components/parameters/RepositorioId'
+      - $ref: '#/components/parameters/VinculacionId'
+      responses:
+        '200':
+          description: Aviso reenviado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Vinculacion'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '400':
+          description: La vinculación ya no está pendiente.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /repositorios/{repositorioId}/vinculaciones/{vinculacionId}/cancelacion:
+    post:
+      tags:
+      - Vinculaciones
+      operationId: cancelarVinculacion
+      summary: Cancelar una solicitud pendiente
+      description: Transición de pendiente a cancelada. Repetirla responde 400 y el médico ya no puede aceptar la
+        solicitud.
+      x-acceptance-criteria:
+      - RF-14-AC-7
+      parameters:
+      - $ref: '#/components/parameters/RepositorioId'
+      - $ref: '#/components/parameters/VinculacionId'
+      responses:
+        '200':
+          description: Solicitud cancelada; el médico ya no puede aceptarla.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Vinculacion'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+        '400':
+          description: La vinculación no está pendiente.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /repositorios/{repositorioId}/vinculaciones/{vinculacionId}/revocacion:
+    post:
+      tags:
+      - Vinculaciones
+      operationId: revocarVinculacion
+      summary: Revocar una vinculación vigente (desvincular al médico)
+      description: Con efecto inmediato, el paciente desaparece de la lista del médico y toda petición suya sobre
+        el historial recibe 403.
+      x-acceptance-criteria:
+      - RF-14-AC-2
+      - RF-14-AC-5
+      parameters:
+      - $ref: '#/components/parameters/RepositorioId'
+      - $ref: '#/components/parameters/VinculacionId'
+      responses:
+        '200':
+          description: Vinculación revocada.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Vinculacion'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+        '400':
+          description: La vinculación no está vigente.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /vinculaciones/recibidas:
+    get:
+      tags:
+      - Vinculaciones
+      operationId: listarVinculacionesRecibidas
+      summary: (Médico) Solicitudes y pacientes vinculados a mi cuenta
+      description: 'Muestra solicitudes pendientes (con nombre de quien envía, nombre del paciente y vigencia solicitada,
+        sin ningún documento) y pacientes con vinculación vigente. Una vinculación vencida, revocada o desvinculada
+        desaparece de la lista vigente.
+
+        '
+      x-acceptance-criteria:
+      - RF-12-AC-11
+      - RF-13-AC-1
+      - RF-14-AC-5
+      - RF-14-AC-6
+      - RF-12-AC-15
+      parameters:
+      - name: estado
+        in: query
+        description: Por defecto `pendiente_aceptacion` y `vigente`.
+        schema:
+          $ref: '#/components/schemas/EstadoVinculacion'
+      responses:
+        '200':
+          description: Vinculaciones dirigidas al médico autenticado.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/VinculacionRecibida'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /vinculaciones/{vinculacionId}/aceptacion:
+    post:
+      tags:
+      - Vinculaciones
+      operationId: aceptarVinculacion
+      summary: (Médico) Aceptar una solicitud de vinculación
+      description: La vigencia se cuenta desde este momento. No puede aceptarse una solicitud vencida (7 días),
+        cancelada o rechazada.
+      x-acceptance-criteria:
+      - RF-12-AC-12
+      - RF-12-AC-15
+      - RF-12-AC-16
+      parameters:
+      - $ref: '#/components/parameters/VinculacionId'
+      responses:
+        '200':
+          description: Vinculación vigente.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VinculacionRecibida'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: El usuario no es el médico destinatario; el estado no cambia.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+        '400':
+          description: La solicitud ya no está pendiente (vencida, cancelada, rechazada o ya aceptada).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /vinculaciones/{vinculacionId}/rechazo:
+    post:
+      tags:
+      - Vinculaciones
+      operationId: rechazarVinculacion
+      summary: (Médico) Rechazar una solicitud de vinculación
+      description: Transición de pendiente a rechazada, solo para el médico destinatario. Repetirla responde 400.
+      x-acceptance-criteria:
+      - RF-12-AC-13
+      - RF-12-AC-16
+      parameters:
+      - $ref: '#/components/parameters/VinculacionId'
+      responses:
+        '200':
+          description: Solicitud rechazada; el médico no obtiene acceso.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VinculacionRecibida'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: El usuario no es el médico destinatario; el estado no cambia.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+        '400':
+          description: La solicitud ya no está pendiente.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /repositorios/{repositorioId}/exportacion:
+    get:
+      tags:
+      - ARCO
+      operationId: exportarHistorial
+      summary: Exportar el historial completo (ZIP con documentos originales y resumen.pdf)
+      description: Derecho de acceso (LFPDPPP). Solo paciente/cuidador. El ZIP trae los originales (hash SHA-256
+        idéntico al registrado) y `resumen.pdf` con nombre del paciente, fecha de exportación y una fila por documento.
+      x-acceptance-criteria:
+      - RF-15-AC-1
+      - RF-15-AC-2
+      - RF-15-AC-3
+      - RF-15-AC-4
+      - RF-05-AC-3
+      parameters:
+      - $ref: '#/components/parameters/RepositorioId'
+      responses:
+        '200':
+          description: Archivo ZIP.
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /cuentas:
+    post:
+      tags:
+      - Cuentas y sesión
+      operationId: registrarCuenta
+      summary: Crear una cuenta (paciente, cuidador o médico)
+      description: Crea la cuenta sin verificar y envía el correo de verificación. No permite iniciar sesión hasta
+        verificar.
+      security: []
+      x-acceptance-criteria:
+      - RF-01-AC-1
+      - RF-01-AC-2
+      - RF-01-AC-3
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegistroRequest'
+      responses:
+        '201':
+          description: Cuenta creada sin verificar; correo de verificación enviado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsuarioResumen'
+        '400':
+          description: Datos invalidos, falta de consentimiento o correo ya registrado; el mensaje para duplicado
+            es "Ya existe una cuenta con ese correo".
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /cuentas/verificacion-correo:
+    post:
+      tags:
+      - Cuentas y sesión
+      operationId: verificarCorreo
+      summary: Verificar el correo con el código/enlace recibido
+      description: Consume el token de un solo uso enviado por correo y marca la cuenta como verificada. Un token
+        usado o vencido responde 401.
+      security: []
+      x-acceptance-criteria:
+      - RF-01-AC-1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - token
+              properties:
+                token:
+                  type: string
+                  description: Código o token de un solo uso enviado por correo.
+      responses:
+        '200':
+          description: Correo verificado; la cuenta ya puede iniciar sesión.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsuarioResumen'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /repositorios/{repositorioId}/busquedas:
+    post:
+      tags:
+      - Búsqueda
+      operationId: crearBusqueda
+      summary: Buscar documentos en lenguaje natural
+      description: Recibe la consulta en el cuerpo para no exponerla en la URL. Devuelve una coincidencia principal
+        y, cuando la consulta expresa un periodo, todos los documentos de ese periodo. Solo busca dentro del repositorio
+        y del alcance autorizado. Sin coincidencias devuelve una lista vacia y el mensaje exacto del SRS. No interpreta
+        ni diagnostica (RD-02).
+      x-acceptance-criteria:
+      - RF-10-AC-1
+      - RF-10-AC-2
+      - RF-10-AC-3
+      - RF-10-AC-4
+      - RF-10-AC-5
+      - RF-10-AC-6
+      - RF-10-AC-7
+      - RF-10-AC-8
+      - RF-10-AC-9
+      - RF-10-AC-10
+      parameters:
+      - $ref: '#/components/parameters/RepositorioId'
+      responses:
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+        '503':
+          description: Proveedor de IA no disponible o cuota agotada ("La búsqueda no está disponible en este momento.
+            Puede ver los documentos en la lista.").
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '201':
+          description: Busqueda creada; incluye resultado principal y documentos del periodo cuando aplique.
+          headers:
+            Location:
+              description: URI del recurso de busqueda.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BusquedaResultado'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BusquedaCrear'
+  /repositorios/{repositorioId}/busquedas/{busquedaId}:
+    get:
+      tags:
+      - Búsqueda
+      operationId: obtenerBusqueda
+      summary: Consultar una busqueda y su resultado principal
+      description: Devuelve el resultado de la busqueda original, sujeto a una nueva comprobacion de acceso al repositorio
+        y al alcance vigente.
+      x-acceptance-criteria:
+      - RF-10-AC-1
+      - RF-10-AC-2
+      - RF-10-AC-4
+      - RF-10-AC-6
+      - RF-10-AC-7
+      - RF-10-AC-10
+      parameters:
+      - $ref: '#/components/parameters/RepositorioId'
+      - $ref: '#/components/parameters/BusquedaId'
+      responses:
+        '200':
+          description: Resultado original de la busqueda.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BusquedaResultado'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /repositorios/{repositorioId}/busquedas/{busquedaId}/alternativas:
+    get:
+      tags:
+      - Búsqueda
+      operationId: verOtrasCoincidencias
+      summary: Ver otras opciones de coincidencia ("Ver otras opciones")
+      description: Devuelve otras coincidencias de la busqueda original, sin repetir el resultado principal. Se
+        vuelve a comprobar la autorizacion y el alcance vigente.
+      x-acceptance-criteria:
+      - RF-11-AC-1
+      parameters:
+      - $ref: '#/components/parameters/RepositorioId'
+      - $ref: '#/components/parameters/BusquedaId'
+      responses:
+        '200':
+          description: Otras coincidencias posibles, de mayor a menor probabilidad.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - opciones
+                properties:
+                  opciones:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DocumentoResumen'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+        '503':
+          description: Proveedor de IA no disponible.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: 'JWT emitido por `POST /auth/sesiones`. La sesión vence en el servidor tras 30 días sin actividad
+        (RNF-06).
+
+        '
+  headers:
+    Location:
+      description: URI del recurso recién creado.
+      schema:
+        type: string
+        format: uri-reference
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: 'UUID generado por el cliente por cada intención de crear el recurso. Si se repite la misma clave
+        con la misma petición se devuelve la respuesta original sin crear otro recurso; con la misma clave y distinto
+        contenido responde 400. Las claves se conservan 24 horas.
+
+        '
+      schema:
+        type: string
+        format: uuid
+    RepositorioId:
+      name: repositorioId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    DocumentoId:
+      name: documentoId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    VinculacionId:
+      name: vinculacionId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    Pagina:
+      name: pagina
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    TamanoPagina:
+      name: tamanoPagina
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 50
+    BusquedaId:
+      name: busquedaId
+      in: path
+      required: true
+      description: Identificador de la busqueda previamente creada.
+      schema:
+        type: string
+        format: uuid
+  responses:
+    BadRequest:
+      description: Datos inválidos.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: Sin sesión, o token, enlace o código no válidos.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: Sin permiso para la acción o el recurso, incluida una vinculación pendiente, vencida o revocada.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Recurso inexistente o eliminado.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ServerError:
+      description: Error interno del servidor.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ServiceUnavailable:
+      description: Servicio externo (IA o correo) no disponible.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    TooManyRequests:
+      description: Demasiadas solicitudes; reintentar después del tiempo indicado.
+      headers:
+        Retry-After:
+          description: Segundos de espera antes de reintentar.
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+  schemas:
+    Error:
+      type: object
+      required:
+      - codigo
+      - mensaje
+      properties:
+        codigo:
+          type: string
+          example: validacion
+        mensaje:
+          type: string
+          description: Mensaje comprensible para el usuario (RNF-13).
+        detalles:
+          type: array
+          items:
+            type: object
+            properties:
+              campo:
+                type: string
+              problema:
+                type: string
+    Mensaje:
+      type: object
+      required:
+      - mensaje
+      properties:
+        mensaje:
+          type: string
+    TipoCuenta:
+      type: string
+      enum:
+      - paciente
+      - cuidador
+      - medico
+    TipoDocumento:
+      type: string
+      enum:
+      - laboratorio
+      - informe_imagen
+      - receta
+      - otro
+    EstadoDocumento:
+      type: string
+      enum:
+      - pendiente_confirmacion
+      - confirmado
+    FormatoArchivo:
+      type: string
+      enum:
+      - jpg
+      - png
+      - pdf
+    EstadoVinculacion:
+      type: string
+      enum:
+      - pendiente_aceptacion
+      - vigente
+      - vencida
+      - revocada
+      - rechazada
+      - cancelada
+    TamanoTexto:
+      type: string
+      enum:
+      - normal
+      - grande
+      description: Normal = 16 pt; grande = 18 pt o más (RNF-11).
+    RegistroRequest:
+      type: object
+      required:
+      - nombre
+      - correo
+      - contrasena
+      - tipoCuenta
+      - avisoPrivacidadAceptado
+      - consentimientoDatosSalud
+      properties:
+        nombre:
+          type: string
+          minLength: 1
+        correo:
+          type: string
+          format: email
+        contrasena:
+          type: string
+          format: password
+          minLength: 10
+        tipoCuenta:
+          $ref: '#/components/schemas/TipoCuenta'
+        avisoPrivacidadAceptado:
+          type: boolean
+          enum:
+          - true
+          description: Debe ser true; se guarda como `avisoPrivacidadAceptadoEn`.
+        consentimientoDatosSalud:
+          type: boolean
+          enum:
+          - true
+          description: Consentimiento expreso para el tratamiento de datos de salud; debe ser true.
+    UsuarioResumen:
+      type: object
+      required:
+      - id
+      - nombre
+      - correo
+      - tipoCuenta
+      - correoVerificado
+      properties:
+        id:
+          type: string
+          format: uuid
+        nombre:
+          type: string
+        correo:
+          type: string
+          format: email
+        tipoCuenta:
+          $ref: '#/components/schemas/TipoCuenta'
+        correoVerificado:
+          type: boolean
+    LoginRequest:
+      type: object
+      required:
+      - correo
+      - contrasena
+      properties:
+        correo:
+          type: string
+          format: email
+        contrasena:
+          type: string
+          format: password
+    DesafioCodigo:
+      type: object
+      required:
+      - desafioId
+      - venceEn
+      properties:
+        desafioId:
+          type: string
+          format: uuid
+        venceEn:
+          type: string
+          format: date-time
+    LoginCodigoRequest:
+      type: object
+      required:
+      - desafioId
+      - codigo
+      properties:
+        desafioId:
+          type: string
+          format: uuid
+        codigo:
+          type: string
+          pattern: ^[0-9]{6}$
+    TokenSesion:
+      type: object
+      required:
+      - accessToken
+      - tokenType
+      - usuario
+      properties:
+        accessToken:
+          type: string
+        tokenType:
+          type: string
+          enum:
+          - Bearer
+        usuario:
+          $ref: '#/components/schemas/UsuarioResumen'
+    RepositorioCrear:
+      type: object
+      required:
+      - titularNombreCompleto
+      - titularEsOperador
+      properties:
+        titularNombreCompleto:
+          type: string
+          minLength: 1
+        titularEsOperador:
+          type: boolean
+          description: true si el titular es el propio usuario. Las cuentas de paciente siempre deben enviar true.
+        declaracionAutorizacion:
+          type: boolean
+          description: Obligatoria (true) cuando `titularEsOperador` es false.
+        tamanoTexto:
+          $ref: '#/components/schemas/TamanoTexto'
+    Repositorio:
+      type: object
+      required:
+      - id
+      - creadoEn
+      - titular
+      - titularEsOperador
+      - tamanoTexto
+      properties:
+        id:
+          type: string
+          format: uuid
+        creadoEn:
+          type: string
+          format: date-time
+        titular:
+          type: object
+          required:
+          - nombreCompleto
+          properties:
+            nombreCompleto:
+              type: string
+        titularEsOperador:
+          type: boolean
+        declaracionAutorizacion:
+          type: object
+          nullable: true
+          properties:
+            declaradaEn:
+              type: string
+              format: date-time
+            declaradaPorUsuarioId:
+              type: string
+              format: uuid
+        tamanoTexto:
+          $ref: '#/components/schemas/TamanoTexto'
+    Documento:
+      type: object
+      required:
+      - id
+      - nombreArchivo
+      - formato
+      - tamanoBytes
+      - hashSha256
+      - estado
+      - subidoEn
+      properties:
+        id:
+          type: string
+          format: uuid
+        nombreArchivo:
+          type: string
+        formato:
+          $ref: '#/components/schemas/FormatoArchivo'
+        tamanoBytes:
+          type: integer
+        hashSha256:
+          type: string
+        estado:
+          $ref: '#/components/schemas/EstadoDocumento'
+        fechaDocumento:
+          type: string
+          format: date
+          nullable: true
+          description: Nula mientras esté pendiente de confirmación.
+        tipo:
+          allOf:
+          - $ref: '#/components/schemas/TipoDocumento'
+          nullable: true
+        sugerenciaFecha:
+          type: string
+          format: date
+          nullable: true
+        sugerenciaTipo:
+          allOf:
+          - $ref: '#/components/schemas/TipoDocumento'
+          nullable: true
+        deteccionDisponible:
+          type: boolean
+          description: false si el proveedor de IA falló; la aplicación muestra el selector manual.
+        subidoEn:
+          type: string
+          format: date-time
+    DocumentoResumen:
+      type: object
+      required:
+      - id
+      - nombreArchivo
+      - fechaDocumento
+      - tipo
+      properties:
+        id:
+          type: string
+          format: uuid
+        nombreArchivo:
+          type: string
+        fechaDocumento:
+          type: string
+          format: date
+        tipo:
+          $ref: '#/components/schemas/TipoDocumento'
+    DocumentoPagina:
+      type: object
+      required:
+      - items
+      - pagina
+      - tamanoPagina
+      - total
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Documento'
+        pagina:
+          type: integer
+        tamanoPagina:
+          type: integer
+        total:
+          type: integer
+    MetadatosCorreccion:
+      type: object
+      minProperties: 1
+      properties:
+        fecha:
+          type: string
+          format: date
+        tipo:
+          $ref: '#/components/schemas/TipoDocumento'
+    MetadatosCorreccionCompleta:
+      type: object
+      required:
+      - fecha
+      - tipo
+      properties:
+        fecha:
+          type: string
+          format: date
+        tipo:
+          $ref: '#/components/schemas/TipoDocumento'
+    CambioMetadato:
+      type: object
+      required:
+      - fechaHora
+      - campo
+      - valorAnterior
+      - realizadoPorUsuarioId
+      properties:
+        fechaHora:
+          type: string
+          format: date-time
+        campo:
+          type: string
+          enum:
+          - fecha
+          - tipo
+        valorAnterior:
+          type: string
+        realizadoPorUsuarioId:
+          type: string
+          format: uuid
+    BusquedaResultado:
+      type: object
+      required:
+      - id
+      - consulta
+      - resultados
+      properties:
+        id:
+          type: string
+          format: uuid
+        consulta:
+          type: string
+        principal:
+          allOf:
+          - $ref: '#/components/schemas/DocumentoResumen'
+          nullable: true
+          description: Coincidencia más probable; nulo si no hay coincidencias.
+        resultados:
+          type: array
+          description: Si la consulta expresa un periodo, todos los documentos del periodo; vacío si no hay coincidencias.
+          items:
+            $ref: '#/components/schemas/DocumentoResumen'
+        mensaje:
+          type: string
+          nullable: true
+          description: 'Solo cuando no hay coincidencias: "No encontré documentos que coincidan con su búsqueda."'
+    Alcance:
+      oneOf:
+      - $ref: '#/components/schemas/AlcanceTotal'
+      - $ref: '#/components/schemas/AlcanceRangoFechas'
+      - $ref: '#/components/schemas/AlcanceTipos'
+      - $ref: '#/components/schemas/AlcanceDocumentos'
+      discriminator:
+        propertyName: tipo
+        mapping:
+          total: '#/components/schemas/AlcanceTotal'
+          rango_fechas: '#/components/schemas/AlcanceRangoFechas'
+          tipos: '#/components/schemas/AlcanceTipos'
+          documentos: '#/components/schemas/AlcanceDocumentos'
+    AlcanceTotal:
+      type: object
+      required:
+      - tipo
+      properties:
+        tipo:
+          type: string
+          enum:
+          - total
+    AlcanceRangoFechas:
+      type: object
+      required:
+      - tipo
+      - fechaDesde
+      - fechaHasta
+      properties:
+        tipo:
+          type: string
+          enum:
+          - rango_fechas
+        fechaDesde:
+          type: string
+          format: date
+        fechaHasta:
+          type: string
+          format: date
+    AlcanceTipos:
+      type: object
+      required:
+      - tipo
+      - tipos
+      properties:
+        tipo:
+          type: string
+          enum:
+          - tipos
+        tipos:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/TipoDocumento'
+    AlcanceDocumentos:
+      type: object
+      required:
+      - tipo
+      - documentoIds
+      properties:
+        tipo:
+          type: string
+          enum:
+          - documentos
+        documentoIds:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            type: string
+            format: uuid
+    VinculacionCrear:
+      type: object
+      required:
+      - correoMedico
+      - alcance
+      properties:
+        correoMedico:
+          type: string
+          format: email
+        alcance:
+          $ref: '#/components/schemas/Alcance'
+        vigenciaDias:
+          type: integer
+          minimum: 1
+          maximum: 365
+          nullable: true
+          description: Días de vigencia desde la aceptación. Obligatoria salvo que `sinVencimiento` sea true.
+        sinVencimiento:
+          type: boolean
+          default: false
+    Vinculacion:
+      type: object
+      required:
+      - id
+      - repositorioId
+      - medico
+      - estado
+      - alcance
+      - solicitadaEn
+      - avisoEnviado
+      properties:
+        id:
+          type: string
+          format: uuid
+        repositorioId:
+          type: string
+          format: uuid
+        medico:
+          type: object
+          required:
+          - id
+          - nombre
+          - correo
+          properties:
+            id:
+              type: string
+              format: uuid
+            nombre:
+              type: string
+            correo:
+              type: string
+              format: email
+        estado:
+          $ref: '#/components/schemas/EstadoVinculacion'
+        alcance:
+          $ref: '#/components/schemas/Alcance'
+        vigenciaDias:
+          type: integer
+          nullable: true
+        sinVencimiento:
+          type: boolean
+        solicitadaEn:
+          type: string
+          format: date-time
+        aceptadaEn:
+          type: string
+          format: date-time
+          nullable: true
+        venceEn:
+          type: string
+          format: date-time
+          nullable: true
+          description: Calculado desde la aceptación; nulo si está pendiente o es sin vencimiento.
+        avisoEnviado:
+          type: boolean
+          description: false muestra "aviso no enviado" y habilita "Reenviar aviso".
+    VinculacionRecibida:
+      type: object
+      required:
+      - id
+      - repositorioId
+      - nombrePaciente
+      - solicitadaPor
+      - estado
+      - alcance
+      properties:
+        id:
+          type: string
+          format: uuid
+        repositorioId:
+          type: string
+          format: uuid
+        nombrePaciente:
+          type: string
+        solicitadaPor:
+          type: string
+        estado:
+          $ref: '#/components/schemas/EstadoVinculacion'
+        alcance:
+          $ref: '#/components/schemas/Alcance'
+        vigenciaDias:
+          type: integer
+          nullable: true
+        sinVencimiento:
+          type: boolean
+        venceEn:
+          type: string
+          format: date-time
+          nullable: true
+    BusquedaCrear:
+      type: object
+      required:
+      - consulta
+      properties:
+        consulta:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: Expresion cotidiana en espanol.
