@@ -1,0 +1,471 @@
+@startuml
+title RepoSalud - propuesta de modelo de dominio compartido
+hide methods
+skinparam classAttributeIconSize 0
+skinparam linetype ortho
+
+enum TipoCuenta {
+  paciente
+  cuidador
+  medico
+}
+
+enum EstadoDocumento {
+  pendiente_confirmacion
+  confirmado
+}
+
+enum TipoDocumento {
+  laboratorio
+  informe_imagen
+  receta
+  otro
+}
+
+enum FormatoArchivo {
+  jpg
+  png
+  pdf
+}
+
+enum TamanoTexto {
+  normal
+  grande
+}
+
+enum EstadoVinculacion {
+  pendiente_aceptacion
+  vigente
+  vencida
+  revocada
+  rechazada
+  cancelada
+}
+
+enum TipoAlcance {
+  total
+  rango_fechas
+  tipos
+  documentos
+}
+
+enum TipoTokenCuenta {
+  verificacion_correo
+  recuperacion_contrasena
+}
+
+class Cuenta {
+  +id: UUID <<PK>>
+  +nombre: string
+  +correo: string <<unique>>
+  +hashContrasena: string
+  +tipo: TipoCuenta
+  +correoVerificadoEn: datetime?
+  +bloqueadaDesde: datetime?
+  +bloqueadaHasta: datetime?
+  +intentosContrasenaFallidos: integer
+  +creadaEn: datetime
+}
+
+class ConsentimientoCuenta {
+  +id: UUID <<PK>>
+  +cuentaId: UUID <<FK>>
+  +versionAvisoPrivacidad: string
+  +avisoPrivacidadAceptado: boolean
+  +consentimientoDatosSalud: boolean
+  +otorgadoEn: datetime
+}
+
+class Repositorio {
+  +id: UUID <<PK>>
+  +operadorCuentaId: UUID <<FK, unique>>
+  +titularPacienteId: UUID <<FK>>
+  +titularEsOperador: boolean
+  +autorizacionDeclaradaEn: datetime?
+  +autorizacionDeclaradaPorCuentaId: UUID?
+  +creadoEn: datetime
+  +eliminadoEn: datetime?
+}
+
+class TitularPaciente {
+  +id: UUID <<PK>>
+  +nombreCompleto: string
+  +cuentaId: UUID? <<FK, unique>>
+}
+
+class PreferenciasAccesibilidad {
+  +repositorioId: UUID <<PK, FK>>
+  +tamanoTexto: TamanoTexto
+}
+
+class Documento {
+  +id: UUID <<PK>>
+  +repositorioId: UUID <<FK>>
+  +nombreArchivo: string
+  +formato: FormatoArchivo
+  +deteccionDisponible: boolean
+  +tamanoBytes: integer
+  +hashSha256: string
+  +estado: EstadoDocumento
+  +fechaDocumento: date?
+  +tipo: TipoDocumento?
+  +sugerenciaFecha: date?
+  +sugerenciaTipo: TipoDocumento?
+  +subidoEn: datetime
+  +eliminadoEn: datetime?
+}
+
+class ArchivoOriginal {
+  +documentoId: UUID <<PK, FK>>
+  +claveAlmacenamiento: string
+  +tipoContenido: string
+  +metadatosCifrado: string
+}
+
+class CambioMetadatos {
+  +id: UUID <<PK>>
+  +documentoId: UUID <<FK>>
+  +realizadoPorCuentaId: UUID <<FK>>
+  +fechaHora: datetime
+  +campo: string
+  +valorAnterior: string
+}
+
+class DesafioOTP {
+  +id: UUID <<PK>>
+  +cuentaId: UUID <<FK>>
+  +codigoHash: string
+  +creadoEn: datetime
+  +expiraEn: datetime
+  +usadoEn: datetime?
+  +intentosFallidos: integer
+}
+
+class TokenCuenta {
+  +id: UUID <<PK>>
+  +cuentaId: UUID <<FK>>
+  +tipo: TipoTokenCuenta
+  +tokenHash: string
+  +creadoEn: datetime
+  +expiraEn: datetime
+  +usadoEn: datetime?
+}
+
+class Sesion {
+  +id: UUID <<PK>>
+  +cuentaId: UUID <<FK>>
+  +creadaEn: datetime
+  +ultimaActividadEn: datetime
+  +expiraEn: datetime
+  +revocadaEn: datetime?
+}
+
+class Vinculacion {
+  +id: UUID <<PK>>
+  +repositorioId: UUID <<FK>>
+  +medicoCuentaId: UUID <<FK>>
+  +estado: EstadoVinculacion
+  +solicitadaEn: datetime
+  +solicitudExpiraEn: datetime
+  +aceptadaEn: datetime?
+  +vigenciaDias: integer?
+  +sinVencimiento: boolean
+  +venceEn: datetime?
+  +avisoEnviadoEn: datetime?
+}
+
+class AlcanceVinculacion {
+  +vinculacionId: UUID <<PK, FK>>
+  +tipo: TipoAlcance
+  +fechaDesde: date?
+  +fechaHasta: date?
+  +tiposDocumento: TipoDocumento[*]
+}
+
+class VinculacionDocumento {
+  +vinculacionId: UUID <<PK, FK>>
+  +documentoId: UUID <<PK, FK>>
+}
+
+class Busqueda {
+  +id: UUID <<PK>>
+  +repositorioId: UUID <<FK>>
+  +realizadaPorCuentaId: UUID <<FK>>
+  +consulta: string
+  +creadaEn: datetime
+}
+
+class ResultadoBusqueda {
+  +busquedaId: UUID <<PK, FK>>
+  +documentoId: UUID <<PK, FK>>
+  +posicion: integer
+  +puntaje: decimal?
+}
+
+package "DTOs HTTP (campos de schemas OpenAPI)" {
+  class ErrorDTO <<OpenAPI>> {
+    +codigo: string
+    +mensaje: string
+    +detalles: ErrorDetalleDTO[*]
+  }
+
+  class ErrorDetalleDTO <<OpenAPI>> {
+    +campo: string
+    +problema: string
+  }
+
+  class MensajeDTO <<OpenAPI: Mensaje>> {
+    +mensaje: string
+  }
+
+  class RegistroRequest <<OpenAPI>> {
+    +nombre: string
+    +correo: string
+    +contrasena: string
+    +tipoCuenta: TipoCuenta
+    +avisoPrivacidadAceptado: boolean
+    +consentimientoDatosSalud: boolean
+  }
+
+  class UsuarioResumen <<OpenAPI>> {
+    +id: UUID
+    +nombre: string
+    +correo: email
+    +tipoCuenta: TipoCuenta
+    +correoVerificado: boolean
+  }
+
+  class LoginRequest <<OpenAPI>> {
+    +correo: email
+    +contrasena: string
+  }
+
+  class DesafioCodigo <<OpenAPI>> {
+    +desafioId: UUID
+    +venceEn: datetime
+  }
+
+  class LoginCodigoRequest <<OpenAPI>> {
+    +desafioId: UUID
+    +codigo: string
+  }
+
+  class TokenSesion <<OpenAPI>> {
+    +accessToken: string
+    +tokenType: string
+    +usuario: UsuarioResumen
+  }
+
+  class RepositorioCrear <<OpenAPI>> {
+    +titularNombreCompleto: string
+    +titularEsOperador: boolean
+    +declaracionAutorizacion: boolean
+    +tamanoTexto: TamanoTexto
+  }
+
+  class TitularDTO <<OpenAPI>> {
+    +nombreCompleto: string
+  }
+
+  class DeclaracionAutorizacionDTO <<OpenAPI>> {
+    +declaradaEn: datetime
+    +declaradaPorUsuarioId: UUID
+  }
+
+  class RepositorioDTO <<OpenAPI>> {
+    +id: UUID
+    +creadoEn: datetime
+    +titular: TitularDTO
+    +titularEsOperador: boolean
+    +declaracionAutorizacion: DeclaracionAutorizacionDTO?
+    +tamanoTexto: TamanoTexto
+  }
+
+  class DocumentoDTO <<OpenAPI>> {
+    +id: UUID
+    +nombreArchivo: string
+    +formato: FormatoArchivo
+    +tamanoBytes: integer
+    +hashSha256: string
+    +estado: EstadoDocumento
+    +fechaDocumento: date?
+    +tipo: TipoDocumento?
+    +sugerenciaFecha: date?
+    +sugerenciaTipo: TipoDocumento?
+    +deteccionDisponible: boolean
+    +subidoEn: datetime
+  }
+
+  class DocumentoResumenDTO <<OpenAPI>> {
+    +id: UUID
+    +nombreArchivo: string
+    +fechaDocumento: date
+    +tipo: TipoDocumento
+  }
+
+  class DocumentoPagina <<OpenAPI>> {
+    +items: DocumentoDTO[*]
+    +pagina: integer
+    +tamanoPagina: integer
+    +total: integer
+  }
+
+  class MetadatosCorreccion <<OpenAPI>> {
+    +fecha: date
+    +tipo: TipoDocumento
+  }
+
+  class MetadatosCorreccionCompleta <<OpenAPI>> {
+    +fecha: date
+    +tipo: TipoDocumento
+  }
+
+  class CambioMetadatoDTO <<OpenAPI>> {
+    +fechaHora: datetime
+    +campo: string
+    +valorAnterior: string
+    +realizadoPorUsuarioId: UUID
+  }
+
+  class BusquedaCrear <<OpenAPI>> {
+    +consulta: string
+  }
+
+  class BusquedaResultadoDTO <<OpenAPI>> {
+    +id: UUID
+    +consulta: string
+    +principal: DocumentoResumenDTO?
+    +resultados: DocumentoResumenDTO[*]
+    +mensaje: string?
+  }
+
+  class Alcance <<abstract>>
+
+  class AlcanceTotal <<OpenAPI>> {
+    +tipo: total
+  }
+
+  class AlcanceRangoFechas <<OpenAPI>> {
+    +tipo: rango_fechas
+    +fechaDesde: date
+    +fechaHasta: date
+  }
+
+  class AlcanceTipos <<OpenAPI>> {
+    +tipo: tipos
+    +tipos: TipoDocumento[*]
+  }
+
+  class AlcanceDocumentos <<OpenAPI>> {
+    +tipo: documentos
+    +documentoIds: UUID[*]
+  }
+
+  class VinculacionCrear <<OpenAPI>> {
+    +correoMedico: email
+    +alcance: Alcance
+    +vigenciaDias: integer?
+    +sinVencimiento: boolean
+  }
+
+  class MedicoDTO <<OpenAPI>> {
+    +id: UUID
+    +nombre: string
+    +correo: email
+  }
+
+  class VinculacionDTO <<OpenAPI>> {
+    +id: UUID
+    +repositorioId: UUID
+    +medico: MedicoDTO
+    +estado: EstadoVinculacion
+    +alcance: Alcance
+    +vigenciaDias: integer?
+    +sinVencimiento: boolean
+    +solicitadaEn: datetime
+    +aceptadaEn: datetime?
+    +venceEn: datetime?
+    +avisoEnviado: boolean
+  }
+
+  class VinculacionRecibidaDTO <<OpenAPI>> {
+    +id: UUID
+    +repositorioId: UUID
+    +nombrePaciente: string
+    +solicitadaPor: string
+    +estado: EstadoVinculacion
+    +alcance: Alcance
+    +vigenciaDias: integer?
+    +sinVencimiento: boolean
+    +venceEn: datetime?
+  }
+}
+
+RegistroRequest ..> Cuenta : crea
+TokenSesion ..> UsuarioResumen : respuesta
+RepositorioCrear ..> Repositorio : crea
+RepositorioDTO ..> Repositorio : representa
+DocumentoDTO ..> Documento : representa
+DocumentoPagina ..> DocumentoDTO : pagina
+MetadatosCorreccion ..> Documento : corrige
+MetadatosCorreccionCompleta ..> Documento : confirma
+CambioMetadatoDTO ..> CambioMetadatos : representa
+BusquedaCrear ..> Busqueda : crea
+BusquedaResultadoDTO ..> Busqueda : respuesta
+VinculacionCrear ..> Vinculacion : crea
+VinculacionDTO ..> Vinculacion : representa
+VinculacionRecibidaDTO ..> Vinculacion : respuesta para médico
+Alcance <|-- AlcanceTotal
+Alcance <|-- AlcanceRangoFechas
+Alcance <|-- AlcanceTipos
+Alcance <|-- AlcanceDocumentos
+
+Cuenta "1" -- "0..1" Repositorio : opera
+Cuenta "1" -- "1..*" ConsentimientoCuenta : consentimiento expreso
+Cuenta "0..1" -- "0..1" TitularPaciente : identidad del titular
+TitularPaciente "1" -- "0..*" Repositorio : titular
+Repositorio "1" *-- "1" PreferenciasAccesibilidad
+Repositorio "1" *-- "0..*" Documento
+Documento "1" *-- "1" ArchivoOriginal : original inmutable
+Documento "1" *-- "0..*" CambioMetadatos : historial
+Cuenta "1" -- "0..*" CambioMetadatos : autor
+
+Cuenta "1" -- "0..*" DesafioOTP
+Cuenta "1" -- "0..*" TokenCuenta
+Cuenta "1" -- "0..*" Sesion
+
+Repositorio "1" -- "0..*" Vinculacion
+Cuenta "1" -- "0..*" Vinculacion : medico destinatario
+Vinculacion "1" *-- "1" AlcanceVinculacion
+AlcanceVinculacion "1" -- "0..*" VinculacionDocumento
+Documento "1" -- "0..*" VinculacionDocumento
+
+Repositorio "1" -- "0..*" Busqueda
+Cuenta "1" -- "0..*" Busqueda : actor autorizado
+Busqueda "1" *-- "0..*" ResultadoBusqueda
+Documento "1" -- "0..*" ResultadoBusqueda
+
+note right of Repositorio
+  Una cuenta de paciente/cuidador opera un solo repositorio.
+  El titular se almacena por separado del operador.
+  Si titularEsOperador es false, se registra la declaración
+  de autorización exigida por RF-04.
+end note
+
+note right of Documento
+  Solo se hace visible en historial/búsqueda al confirmar fecha y tipo.
+  La corrección crea CambioMetadatos; no modifica ArchivoOriginal.
+  Eliminación lógica y purga del archivo siguen RF-16/RNF-20.
+end note
+
+note bottom of Vinculacion
+  El acceso se concede únicamente tras aceptación del médico.
+  En cada petición se comprueban estado, vencimiento y alcance.
+end note
+
+note bottom of Busqueda
+  Se persiste el contexto para mostrar alternativas.
+  Los resultados se restringen al repositorio y alcance vigentes.
+  No se persisten respuestas clínicas generadas.
+end note
+@enduml
