@@ -16,6 +16,7 @@ from typing import Annotated, Any, Literal
 import yaml
 from fastapi import (
     Body,
+    Depends,
     FastAPI,
     File,
     Header,
@@ -32,6 +33,13 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from src.auth import (
+    CurrentAccount,
+    create_access_token,
+    require_repository_access,
+    require_repository_operator,
+    require_roles,
+)
 from src.database import assert_database_ready, db_error_to_http, engine
 from src.settings import settings
 
@@ -51,7 +59,8 @@ app = FastAPI(
     version="1.0.0",
     description=(
         "Servicios CRUD de desarrollo basados en S04_A3/openapi_equipo.yaml. "
-        "La autenticación y autorización JWT no se implementan en esta actividad."
+        "Autenticación JWT (Authorization: Bearer <token>) y control de acceso por rol/"
+        "titularidad del repositorio."
     ),
     servers=[{"url": "http://localhost:8000/api/v1", "description": "Desarrollo local"}],
     lifespan=lifespan,
@@ -86,11 +95,7 @@ DEV_OTP_CODE = "000000"
 def contract_openapi() -> dict[str, Any]:
     with CONTRACT_PATH.open(encoding="utf-8") as contract_file:
         schema = yaml.safe_load(contract_file)
-    schema.pop("security", None)
-    schema.get("components", {}).pop("securitySchemes", None)
-    schema["servers"] = [
-        {"url": API_PREFIX, "description": "Desarrollo local; autenticación JWT deshabilitada"}
-    ]
+    schema["servers"] = [{"url": API_PREFIX, "description": "Desarrollo local"}]
     return schema
 
 
@@ -259,44 +264,6 @@ def as_uuid(value: str | uuid.UUID | None) -> uuid.UUID | None:
         return uuid.UUID(str(value))
     except (TypeError, ValueError, AttributeError):
         return None
-
-
-def actor_account_id(
-    connection: Any, requested_id: str | None = None, *, required: bool = True
-) -> uuid.UUID | None:
-    actor_id = as_uuid(requested_id) or as_uuid(settings.dev_actor_account_id)
-    if actor_id is not None:
-        exists = connection.execute(
-            text("SELECT id FROM cuentas WHERE id = :id"), {"id": actor_id}
-        ).scalar_one_or_none()
-        if exists is None:
-            raise HTTPException(
-                status_code=400,
-                detail=error_body("cuenta_invalida", "La cuenta de desarrollo no existe."),
-            )
-        return actor_id
-
-    if settings.dev_actor_account_id:
-        raise HTTPException(
-            status_code=400,
-            detail=error_body("cuenta_invalida", "DEV_ACTOR_ACCOUNT_ID no es un UUID válido."),
-        )
-
-    actor_id = connection.execute(
-        text(
-            "SELECT id FROM cuentas WHERE tipo IN ('paciente', 'cuidador') "
-            "ORDER BY creada_en LIMIT 1"
-        )
-    ).scalar_one_or_none()
-    if actor_id is None and required:
-        raise HTTPException(
-            status_code=400,
-            detail=error_body(
-                "cuenta_requerida",
-                "Registra una cuenta o configura X-Actor-Account-Id para esta prueba CRUD.",
-            ),
-        )
-    return actor_id
 
 
 def repository_row(connection: Any, repository_id: uuid.UUID) -> dict[str, Any]:
@@ -744,7 +711,7 @@ def crear_sesion(body: LoginCodeRequest) -> dict[str, Any]:
             {"account": challenge["cuenta_id"]},
         )
     return {
-        "accessToken": secrets.token_urlsafe(32),
+        "accessToken": create_access_token(challenge["id"], challenge["tipo"]),
         "tokenType": "Bearer",
         "usuario": user_response(challenge),
     }
@@ -803,13 +770,11 @@ def restablecer_contrasena(body: AccountResetRequest) -> dict[str, str]:
 @app.post(f"{API_PREFIX}/repositorios", status_code=201, operation_id="crearRepositorio", responses={400: {}, 401: {}, 403: {}, 500: {}})
 def crear_repositorio(
     body: RepositoryCreateRequest,
-    x_actor_account_id: Annotated[str | None, Header()] = None,
+    current: CurrentAccount,
 ) -> dict[str, Any]:
     with engine.begin() as connection:
-        actor = actor_account_id(connection, x_actor_account_id)
-        account = connection.execute(
-            text("SELECT tipo FROM cuentas WHERE id = :id"), {"id": actor}
-        ).scalar_one()
+        actor = current["id"]
+        account = current["tipo"]
         if account == "medico":
             raise HTTPException(status_code=403, detail=error_body("sin_permiso", "Una cuenta médica no puede crear repositorios."))
         if body.titularEsOperador and account == "paciente":
@@ -859,25 +824,21 @@ def crear_repositorio(
 
 
 @app.get(f"{API_PREFIX}/repositorios/mio", operation_id="obtenerMiRepositorio", responses={401: {}, 403: {}, 404: {}, 500: {}})
-def obtener_mi_repositorio(
-    x_actor_account_id: Annotated[str | None, Header()] = None,
-) -> dict[str, Any]:
+def obtener_mi_repositorio(current: CurrentAccount) -> dict[str, Any]:
     with engine.connect() as connection:
-        actor = actor_account_id(connection, x_actor_account_id)
-        return repository_row(connection, my_repository_id(connection, actor))
+        return repository_row(connection, my_repository_id(connection, current["id"]))
 
 
 @app.patch(f"{API_PREFIX}/repositorios/mio", operation_id="actualizarPreferenciasRepositorio", responses={400: {}, 401: {}, 403: {}, 404: {}, 500: {}})
 def actualizar_preferencias_repositorio(
     body: PreferencesPatchRequest,
-    x_actor_account_id: Annotated[str | None, Header()] = None,
+    current: CurrentAccount,
 ) -> dict[str, Any]:
     changes = body.model_dump(exclude_unset=True)
     if not changes:
         raise HTTPException(status_code=400, detail=error_body("datos_invalidos", "Indica al menos una preferencia para actualizar."))
     with engine.begin() as connection:
-        actor = actor_account_id(connection, x_actor_account_id)
-        repository_id = my_repository_id(connection, actor)
+        repository_id = my_repository_id(connection, current["id"])
         connection.execute(
             text("UPDATE preferencias_accesibilidad SET tamano_texto = :size WHERE repositorio_id = :repo"),
             {"size": changes["tamanoTexto"], "repo": repository_id},
@@ -886,8 +847,9 @@ def actualizar_preferencias_repositorio(
 
 
 @app.get(f"{API_PREFIX}/repositorios/{{repositorioId}}", operation_id="obtenerRepositorio", responses={401: {}, 403: {}, 404: {}, 500: {}})
-def obtener_repositorio(repositorioId: uuid.UUID) -> dict[str, Any]:
+def obtener_repositorio(repositorioId: uuid.UUID, current: CurrentAccount) -> dict[str, Any]:
     with engine.connect() as connection:
+        require_repository_access(connection, repositorioId, current)
         return repository_row(connection, repositorioId)
 
 
@@ -895,8 +857,10 @@ def obtener_repositorio(repositorioId: uuid.UUID) -> dict[str, Any]:
 def eliminar_historial(
     repositorioId: uuid.UUID,
     confirmacion_nombre: Annotated[str, Header(alias="Confirmacion-Nombre")],
+    current: CurrentAccount,
 ) -> Response:
     with engine.begin() as connection:
+        require_repository_operator(connection, repositorioId, current)
         repository = connection.execute(
             text(
                 """
@@ -937,9 +901,9 @@ def eliminar_historial(
 @app.post(f"{API_PREFIX}/repositorios/{{repositorioId}}/documentos", status_code=201, operation_id="subirDocumento", responses={400: {}, 401: {}, 403: {}, 404: {}, 413: {}, 500: {}})
 async def subir_documento(
     repositorioId: uuid.UUID,
+    current: CurrentAccount,
     archivo: UploadFile = File(...),
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
-    x_actor_account_id: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
     content_type = archivo.content_type or ""
     if content_type not in ALLOWED_CONTENT_TYPES:
@@ -957,13 +921,7 @@ async def subir_documento(
     digest = hashlib.sha256(payload).hexdigest()
     try:
         with engine.begin() as connection:
-            actor = actor_account_id(connection, x_actor_account_id)
-            repository_exists = connection.execute(
-                text("SELECT 1 FROM repositorios WHERE id = :id AND eliminado_en IS NULL"),
-                {"id": repositorioId},
-            ).first()
-            if repository_exists is None:
-                raise HTTPException(status_code=404, detail=error_body("repositorio_no_encontrado", "No se encontró el repositorio."))
+            require_repository_operator(connection, repositorioId, current)
             document_id = connection.execute(
                 text(
                     """
@@ -1008,6 +966,7 @@ async def subir_documento(
 @app.get(f"{API_PREFIX}/repositorios/{{repositorioId}}/documentos", operation_id="listarDocumentos", responses={400: {}, 401: {}, 403: {}, 404: {}, 500: {}})
 def listar_documentos(
     repositorioId: uuid.UUID,
+    current: CurrentAccount,
     estado: Literal["pendiente_confirmacion", "confirmado"] | None = None,
     tipo: Literal["laboratorio", "informe_imagen", "receta", "otro"] | None = None,
     desde: date | None = None,
@@ -1017,29 +976,33 @@ def listar_documentos(
 ) -> dict[str, Any]:
     if desde and hasta and desde > hasta:
         raise HTTPException(status_code=400, detail=error_body("filtro_invalido", "La fecha inicial no puede ser posterior a la fecha final."))
-    filters = [
-        "repositorio_id = :repo",
-        "eliminado_en IS NULL",
-    ]
-    params: dict[str, Any] = {
-        "repo": repositorioId,
-        "limit": tamanoPagina,
-        "offset": (pagina - 1) * tamanoPagina,
-    }
-    if estado:
-        filters.append("estado = :state")
-        params["state"] = estado
-    if tipo:
-        filters.append("tipo = :type")
-        params["type"] = tipo
-    if desde:
-        filters.append("fecha_documento >= :start")
-        params["start"] = desde
-    if hasta:
-        filters.append("fecha_documento <= :end")
-        params["end"] = hasta
-    where = " AND ".join(filters)
     with engine.connect() as connection:
+        tier = require_repository_access(connection, repositorioId, current)
+        if tier == "medico":
+            # Un médico solo ve documentos confirmados, sin importar el filtro solicitado.
+            estado = "confirmado"
+        filters = [
+            "repositorio_id = :repo",
+            "eliminado_en IS NULL",
+        ]
+        params: dict[str, Any] = {
+            "repo": repositorioId,
+            "limit": tamanoPagina,
+            "offset": (pagina - 1) * tamanoPagina,
+        }
+        if estado:
+            filters.append("estado = :state")
+            params["state"] = estado
+        if tipo:
+            filters.append("tipo = :type")
+            params["type"] = tipo
+        if desde:
+            filters.append("fecha_documento >= :start")
+            params["start"] = desde
+        if hasta:
+            filters.append("fecha_documento <= :end")
+            params["end"] = hasta
+        where = " AND ".join(filters)
         total = connection.execute(
             text(f"SELECT count(*) FROM documentos WHERE {where}"), params
         ).scalar_one()
@@ -1056,9 +1019,13 @@ def listar_documentos(
 
 
 @app.get(f"{API_PREFIX}/repositorios/{{repositorioId}}/documentos/{{documentoId}}", operation_id="obtenerDocumento", responses={401: {}, 403: {}, 404: {}, 500: {}})
-def obtener_documento(repositorioId: uuid.UUID, documentoId: uuid.UUID) -> dict[str, Any]:
+def obtener_documento(repositorioId: uuid.UUID, documentoId: uuid.UUID, current: CurrentAccount) -> dict[str, Any]:
     with engine.connect() as connection:
-        return document_row(connection, repositorioId, documentoId)
+        tier = require_repository_access(connection, repositorioId, current)
+        document = document_row(connection, repositorioId, documentoId)
+        if tier == "medico" and document["estado"] != "confirmado":
+            raise HTTPException(status_code=403, detail=error_body("sin_permiso", "No tienes acceso a este documento."))
+        return document
 
 
 @app.patch(f"{API_PREFIX}/repositorios/{{repositorioId}}/documentos/{{documentoId}}", operation_id="corregirMetadatos", responses={200: {}, 400: {}, 401: {}, 403: {}, 404: {}, 500: {}})
@@ -1066,14 +1033,15 @@ def corregir_metadatos(
     repositorioId: uuid.UUID,
     documentoId: uuid.UUID,
     body: DocumentMetadataPatchRequest,
-    x_actor_account_id: Annotated[str | None, Header()] = None,
+    current: CurrentAccount,
 ) -> dict[str, Any]:
     changes = body.model_dump(exclude_unset=True)
     if not changes:
         raise HTTPException(status_code=400, detail=error_body("datos_invalidos", "Indica al menos un metadato para corregir."))
     with engine.begin() as connection:
-        actor = actor_account_id(connection, x_actor_account_id)
-        current = connection.execute(
+        require_repository_operator(connection, repositorioId, current)
+        actor = current["id"]
+        current_doc = connection.execute(
             text(
                 """
                 SELECT fecha_documento, tipo, estado FROM documentos
@@ -1082,13 +1050,13 @@ def corregir_metadatos(
             ),
             {"id": documentoId, "repo": repositorioId},
         ).mappings().first()
-        if current is None:
+        if current_doc is None:
             raise HTTPException(status_code=404, detail=error_body("documento_no_encontrado", "No se encontró el documento."))
-        if current["estado"] != "confirmado":
+        if current_doc["estado"] != "confirmado":
             raise HTTPException(status_code=400, detail=error_body("documento_pendiente", "Confirma el documento antes de corregir sus metadatos."))
         for key, column, enum_value in (
-            ("fecha", "fecha_documento", current["fecha_documento"]),
-            ("tipo", "tipo", current["tipo"]),
+            ("fecha", "fecha_documento", current_doc["fecha_documento"]),
+            ("tipo", "tipo", current_doc["tipo"]),
         ):
             if key in changes:
                 previous = enum_value.isoformat() if isinstance(enum_value, date) else enum_value
@@ -1117,8 +1085,9 @@ def corregir_metadatos(
 
 
 @app.delete(f"{API_PREFIX}/repositorios/{{repositorioId}}/documentos/{{documentoId}}", status_code=204, operation_id="eliminarDocumento", responses={401: {}, 403: {}, 404: {}, 500: {}})
-def eliminar_documento(repositorioId: uuid.UUID, documentoId: uuid.UUID) -> Response:
+def eliminar_documento(repositorioId: uuid.UUID, documentoId: uuid.UUID, current: CurrentAccount) -> Response:
     with engine.begin() as connection:
+        require_repository_operator(connection, repositorioId, current)
         result = connection.execute(
             text(
                 """
@@ -1138,8 +1107,10 @@ def confirmar_documento(
     repositorioId: uuid.UUID,
     documentoId: uuid.UUID,
     body: DocumentConfirmRequest,
+    current: CurrentAccount,
 ) -> dict[str, Any]:
     with engine.begin() as connection:
+        require_repository_operator(connection, repositorioId, current)
         result = connection.execute(
             text(
                 """
@@ -1162,9 +1133,12 @@ def confirmar_documento(
 
 
 @app.get(f"{API_PREFIX}/repositorios/{{repositorioId}}/documentos/{{documentoId}}/historial-cambios", operation_id="listarHistorialCambios", responses={401: {}, 403: {}, 404: {}, 500: {}})
-def listar_historial_cambios(repositorioId: uuid.UUID, documentoId: uuid.UUID) -> list[dict[str, Any]]:
+def listar_historial_cambios(repositorioId: uuid.UUID, documentoId: uuid.UUID, current: CurrentAccount) -> list[dict[str, Any]]:
     with engine.connect() as connection:
-        document_row(connection, repositorioId, documentoId)
+        tier = require_repository_access(connection, repositorioId, current)
+        document = document_row(connection, repositorioId, documentoId)
+        if tier == "medico" and document["estado"] != "confirmado":
+            raise HTTPException(status_code=403, detail=error_body("sin_permiso", "No tienes acceso a este documento."))
         rows = connection.execute(
             text(
                 """
@@ -1186,11 +1160,11 @@ def listar_historial_cambios(repositorioId: uuid.UUID, documentoId: uuid.UUID) -
     ]
 
 
-def original_file(connection: Any, repository_id: uuid.UUID, document_id: uuid.UUID) -> tuple[Path, str, str]:
+def original_file(connection: Any, repository_id: uuid.UUID, document_id: uuid.UUID) -> tuple[Path, str, str, str]:
     row = connection.execute(
         text(
             """
-            SELECT d.nombre_archivo, a.clave_almacenamiento, a.tipo_contenido
+            SELECT d.nombre_archivo, d.estado, a.clave_almacenamiento, a.tipo_contenido
             FROM documentos d JOIN archivos_originales a ON a.documento_id = d.id
             WHERE d.id = :doc AND d.repositorio_id = :repo AND d.eliminado_en IS NULL
             """
@@ -1202,20 +1176,29 @@ def original_file(connection: Any, repository_id: uuid.UUID, document_id: uuid.U
     path = (settings.upload_dir / row["clave_almacenamiento"]).resolve()
     if settings.upload_dir.resolve() not in path.parents or not path.is_file():
         raise HTTPException(status_code=404, detail=error_body("archivo_no_encontrado", "No se encontró el archivo original."))
-    return path, row["tipo_contenido"], row["nombre_archivo"]
+    return path, row["tipo_contenido"], row["nombre_archivo"], row["estado"]
+
+
+def _ensure_medico_sees_confirmed(tier: str, estado: str) -> None:
+    if tier == "medico" and estado != "confirmado":
+        raise HTTPException(status_code=403, detail=error_body("sin_permiso", "No tienes acceso a este documento."))
 
 
 @app.get(f"{API_PREFIX}/repositorios/{{repositorioId}}/documentos/{{documentoId}}/contenido", operation_id="visualizarDocumento", responses={401: {}, 403: {}, 404: {}, 500: {}})
-def visualizar_documento(repositorioId: uuid.UUID, documentoId: uuid.UUID) -> FileResponse:
+def visualizar_documento(repositorioId: uuid.UUID, documentoId: uuid.UUID, current: CurrentAccount) -> FileResponse:
     with engine.connect() as connection:
-        path, content_type, filename = original_file(connection, repositorioId, documentoId)
+        tier = require_repository_access(connection, repositorioId, current)
+        path, content_type, filename, estado = original_file(connection, repositorioId, documentoId)
+        _ensure_medico_sees_confirmed(tier, estado)
     return FileResponse(path, media_type=content_type, filename=filename, content_disposition_type="inline")
 
 
 @app.get(f"{API_PREFIX}/repositorios/{{repositorioId}}/documentos/{{documentoId}}/archivo", operation_id="descargarArchivoOriginal", responses={401: {}, 403: {}, 404: {}, 500: {}})
-def descargar_archivo_original(repositorioId: uuid.UUID, documentoId: uuid.UUID) -> FileResponse:
+def descargar_archivo_original(repositorioId: uuid.UUID, documentoId: uuid.UUID, current: CurrentAccount) -> FileResponse:
     with engine.connect() as connection:
-        path, content_type, filename = original_file(connection, repositorioId, documentoId)
+        tier = require_repository_access(connection, repositorioId, current)
+        path, content_type, filename, estado = original_file(connection, repositorioId, documentoId)
+        _ensure_medico_sees_confirmed(tier, estado)
     return FileResponse(path, media_type=content_type, filename=filename)
 
 
@@ -1223,10 +1206,11 @@ def descargar_archivo_original(repositorioId: uuid.UUID, documentoId: uuid.UUID)
 def solicitar_vinculacion(
     repositorioId: uuid.UUID,
     body: LinkCreateRequest,
+    current: CurrentAccount,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> dict[str, Any]:
     with engine.begin() as connection:
-        repository_row(connection, repositorioId)
+        require_repository_operator(connection, repositorioId, current)
         doctor = connection.execute(
             text("SELECT id FROM cuentas WHERE lower(correo) = :email AND tipo = 'medico'"),
             {"email": str(body.correoMedico).lower()},
@@ -1268,19 +1252,29 @@ def solicitar_vinculacion(
 
 
 @app.get(f"{API_PREFIX}/repositorios/{{repositorioId}}/vinculaciones", operation_id="listarVinculaciones", responses={401: {}, 403: {}, 404: {}, 500: {}})
-def listar_vinculaciones(repositorioId: uuid.UUID) -> list[dict[str, Any]]:
+def listar_vinculaciones(repositorioId: uuid.UUID, current: CurrentAccount) -> list[dict[str, Any]]:
     with engine.connect() as connection:
+        tier = require_repository_access(connection, repositorioId, current)
+        query = "SELECT id FROM vinculaciones WHERE repositorio_id = :repo"
+        params: dict[str, Any] = {"repo": repositorioId}
+        if tier == "medico":
+            # Un médico solo ve su propia vinculación, no las de otros médicos con este repo.
+            query += " AND medico_cuenta_id = :doctor"
+            params["doctor"] = current["id"]
         ids = connection.execute(
-            text("SELECT id FROM vinculaciones WHERE repositorio_id = :repo ORDER BY solicitada_en DESC"),
-            {"repo": repositorioId},
+            text(query + " ORDER BY solicitada_en DESC"), params
         ).scalars().all()
         return [link_row(connection, repositorioId, link_id) for link_id in ids]
 
 
 @app.get(f"{API_PREFIX}/repositorios/{{repositorioId}}/vinculaciones/{{vinculacionId}}", operation_id="obtenerVinculacion", responses={401: {}, 403: {}, 404: {}, 500: {}})
-def obtener_vinculacion(repositorioId: uuid.UUID, vinculacionId: uuid.UUID) -> dict[str, Any]:
+def obtener_vinculacion(repositorioId: uuid.UUID, vinculacionId: uuid.UUID, current: CurrentAccount) -> dict[str, Any]:
     with engine.connect() as connection:
-        return link_row(connection, repositorioId, vinculacionId)
+        tier = require_repository_access(connection, repositorioId, current)
+        link = link_row(connection, repositorioId, vinculacionId)
+        if tier == "medico" and link["medico"]["id"] != str(current["id"]):
+            raise HTTPException(status_code=403, detail=error_body("sin_permiso", "Esta vinculación no está dirigida a tu cuenta."))
+        return link
 
 
 def mutate_link_status(
@@ -1312,8 +1306,9 @@ def mutate_link_status(
 
 
 @app.post(f"{API_PREFIX}/repositorios/{{repositorioId}}/vinculaciones/{{vinculacionId}}/reenvio-aviso", operation_id="reenviarAvisoVinculacion", responses={200: {}, 400: {}, 401: {}, 403: {}, 404: {}, 500: {}, 503: {}})
-def reenviar_aviso_vinculacion(repositorioId: uuid.UUID, vinculacionId: uuid.UUID) -> dict[str, Any]:
+def reenviar_aviso_vinculacion(repositorioId: uuid.UUID, vinculacionId: uuid.UUID, current: CurrentAccount) -> dict[str, Any]:
     with engine.begin() as connection:
+        require_repository_operator(connection, repositorioId, current)
         row = connection.execute(
             text(
                 """
@@ -1330,29 +1325,28 @@ def reenviar_aviso_vinculacion(repositorioId: uuid.UUID, vinculacionId: uuid.UUI
 
 
 @app.post(f"{API_PREFIX}/repositorios/{{repositorioId}}/vinculaciones/{{vinculacionId}}/cancelacion", operation_id="cancelarVinculacion", responses={200: {}, 400: {}, 401: {}, 403: {}, 404: {}, 500: {}})
-def cancelar_vinculacion(repositorioId: uuid.UUID, vinculacionId: uuid.UUID) -> dict[str, Any]:
+def cancelar_vinculacion(repositorioId: uuid.UUID, vinculacionId: uuid.UUID, current: CurrentAccount) -> dict[str, Any]:
     with engine.begin() as connection:
+        require_repository_operator(connection, repositorioId, current)
         return mutate_link_status(connection, repositorioId, vinculacionId, ("pendiente_aceptacion",), "cancelada")
 
 
 @app.post(f"{API_PREFIX}/repositorios/{{repositorioId}}/vinculaciones/{{vinculacionId}}/revocacion", operation_id="revocarVinculacion", responses={200: {}, 400: {}, 401: {}, 403: {}, 404: {}, 500: {}})
-def revocar_vinculacion(repositorioId: uuid.UUID, vinculacionId: uuid.UUID) -> dict[str, Any]:
+def revocar_vinculacion(repositorioId: uuid.UUID, vinculacionId: uuid.UUID, current: CurrentAccount) -> dict[str, Any]:
     with engine.begin() as connection:
+        require_repository_operator(connection, repositorioId, current)
         return mutate_link_status(connection, repositorioId, vinculacionId, ("vigente",), "revocada")
 
 
 @app.get(f"{API_PREFIX}/vinculaciones/recibidas", operation_id="listarVinculacionesRecibidas", responses={401: {}, 403: {}, 500: {}})
 def listar_vinculaciones_recibidas(
+    current: Annotated[dict[str, Any], Depends(require_roles("medico"))],
     estado: Literal[
         "pendiente_aceptacion", "vigente", "vencida", "revocada", "rechazada", "cancelada"
     ] | None = None,
-    x_actor_account_id: Annotated[str | None, Header()] = None,
 ) -> list[dict[str, Any]]:
     with engine.connect() as connection:
-        actor = actor_account_id(connection, x_actor_account_id, required=False)
-        if actor is None:
-            return []
-        params: dict[str, Any] = {"doctor": actor}
+        params: dict[str, Any] = {"doctor": current["id"]}
         state_filter = ""
         if estado:
             state_filter = " AND estado = :state"
@@ -1368,8 +1362,15 @@ def listar_vinculaciones_recibidas(
         return [received_link_row(connection, link_id) for link_id in ids]
 
 
-def decide_received_link(link_id: uuid.UUID, target_state: str) -> dict[str, Any]:
+def decide_received_link(link_id: uuid.UUID, actor_id: uuid.UUID, target_state: str) -> dict[str, Any]:
     with engine.begin() as connection:
+        link = connection.execute(
+            text("SELECT medico_cuenta_id FROM vinculaciones WHERE id = :id"), {"id": link_id}
+        ).mappings().first()
+        if link is None:
+            raise HTTPException(status_code=404, detail=error_body("vinculacion_no_encontrada", "No se encontró la vinculación."))
+        if link["medico_cuenta_id"] != actor_id:
+            raise HTTPException(status_code=403, detail=error_body("sin_permiso", "Esta vinculación no está dirigida a tu cuenta."))
         if target_state == "vigente":
             updated = connection.execute(
                 text(
@@ -1401,27 +1402,26 @@ def decide_received_link(link_id: uuid.UUID, target_state: str) -> dict[str, Any
                 {"id": link_id},
             ).first()
         if updated is None:
-            exists = connection.execute(
-                text("SELECT 1 FROM vinculaciones WHERE id = :id"), {"id": link_id}
-            ).first()
-            if exists is None:
-                raise HTTPException(status_code=404, detail=error_body("vinculacion_no_encontrada", "No se encontró la vinculación."))
             raise HTTPException(status_code=400, detail=error_body("estado_invalido", "La solicitud ya no está pendiente o venció."))
         return received_link_row(connection, link_id)
 
 
 @app.post(f"{API_PREFIX}/vinculaciones/{{vinculacionId}}/aceptacion", operation_id="aceptarVinculacion", responses={200: {}, 400: {}, 401: {}, 403: {}, 404: {}, 500: {}})
-def aceptar_vinculacion(vinculacionId: uuid.UUID) -> dict[str, Any]:
-    return decide_received_link(vinculacionId, "vigente")
+def aceptar_vinculacion(
+    vinculacionId: uuid.UUID, current: Annotated[dict[str, Any], Depends(require_roles("medico"))]
+) -> dict[str, Any]:
+    return decide_received_link(vinculacionId, current["id"], "vigente")
 
 
 @app.post(f"{API_PREFIX}/vinculaciones/{{vinculacionId}}/rechazo", operation_id="rechazarVinculacion", responses={200: {}, 400: {}, 401: {}, 403: {}, 404: {}, 500: {}})
-def rechazar_vinculacion(vinculacionId: uuid.UUID) -> dict[str, Any]:
-    return decide_received_link(vinculacionId, "rechazada")
+def rechazar_vinculacion(
+    vinculacionId: uuid.UUID, current: Annotated[dict[str, Any], Depends(require_roles("medico"))]
+) -> dict[str, Any]:
+    return decide_received_link(vinculacionId, current["id"], "rechazada")
 
 
 @app.get(f"{API_PREFIX}/repositorios/{{repositorioId}}/exportacion", operation_id="exportarHistorial", responses={401: {}, 403: {}, 404: {}, 500: {}})
-def exportar_historial(repositorioId: uuid.UUID) -> StreamingResponse:
+def exportar_historial(repositorioId: uuid.UUID, current: CurrentAccount) -> StreamingResponse:
     try:
         from reportlab.lib.pagesizes import letter
         from reportlab.pdfgen import canvas
@@ -1429,6 +1429,7 @@ def exportar_historial(repositorioId: uuid.UUID) -> StreamingResponse:
         raise HTTPException(status_code=503, detail=error_body("exportacion_no_disponible", "Instala reportlab para habilitar exportaciones.")) from exc
 
     with engine.connect() as connection:
+        require_repository_access(connection, repositorioId, current)
         repo = repository_row(connection, repositorioId)
         rows = connection.execute(
             text(
@@ -1485,11 +1486,11 @@ def exportar_historial(repositorioId: uuid.UUID) -> StreamingResponse:
 def crear_busqueda(
     repositorioId: uuid.UUID,
     body: SearchCreateRequest,
-    x_actor_account_id: Annotated[str | None, Header()] = None,
+    current: CurrentAccount,
 ) -> dict[str, Any]:
     with engine.begin() as connection:
-        actor = actor_account_id(connection, x_actor_account_id)
-        repository_row(connection, repositorioId)
+        require_repository_access(connection, repositorioId, current)
+        actor = current["id"]
         search_id = connection.execute(
             text(
                 """
@@ -1574,14 +1575,16 @@ def search_response(connection: Any, repository_id: uuid.UUID, search_id: uuid.U
 
 
 @app.get(f"{API_PREFIX}/repositorios/{{repositorioId}}/busquedas/{{busquedaId}}", operation_id="obtenerBusqueda", responses={200: {}, 401: {}, 403: {}, 404: {}, 500: {}, 503: {}})
-def obtener_busqueda(repositorioId: uuid.UUID, busquedaId: uuid.UUID) -> dict[str, Any]:
+def obtener_busqueda(repositorioId: uuid.UUID, busquedaId: uuid.UUID, current: CurrentAccount) -> dict[str, Any]:
     with engine.connect() as connection:
+        require_repository_access(connection, repositorioId, current)
         return search_response(connection, repositorioId, busquedaId)
 
 
 @app.get(f"{API_PREFIX}/repositorios/{{repositorioId}}/busquedas/{{busquedaId}}/alternativas", operation_id="verOtrasCoincidencias", responses={200: {}, 400: {}, 401: {}, 403: {}, 404: {}, 500: {}, 503: {}})
-def ver_alternativas(repositorioId: uuid.UUID, busquedaId: uuid.UUID) -> dict[str, Any]:
+def ver_alternativas(repositorioId: uuid.UUID, busquedaId: uuid.UUID, current: CurrentAccount) -> dict[str, Any]:
     with engine.connect() as connection:
+        require_repository_access(connection, repositorioId, current)
         search_response(connection, repositorioId, busquedaId)
         rows = connection.execute(
             text(

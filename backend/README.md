@@ -23,13 +23,21 @@ La aplicación comprueba conexión y tablas al iniciar. Si falta una tabla o Pos
 
 El almacenamiento local de archivos usa `UPLOAD_DIR` (por defecto `./uploads`). Para exportar un ZIP con `resumen.pdf` se incluye ReportLab en las dependencias.
 
-## Contexto de actor en desarrollo
+## Autenticación
 
-**Este entregable no implementa autenticación ni autorización JWT.** El bearerAuth del contrato se retira de la especificación servida por `/openapi.json`. Para operaciones que necesiten un actor, la API admite opcionalmente `X-Actor-Account-Id`; si no se envía, usa `DEV_ACTOR_ACCOUNT_ID` o la primera cuenta paciente/cuidador. Este contexto solo relaciona registros en la base y no es un control de acceso. No publicar este servidor ni usarlo con datos reales.
+`POST /auth/sesiones` emite un JWT (HS256, firmado con `JWT_SECRET`, vigencia `JWT_EXPIRATION`
+segundos). Todas las rutas salvo las 6 marcadas `security: []` en el contrato
+(`POST /cuentas`, `POST /cuentas/verificacion-correo`, `POST /auth/desafios`,
+`POST /auth/sesiones`, `POST /auth/recuperaciones`, `POST /auth/recuperaciones/restablecimiento`)
+requieren `Authorization: Bearer <token>`. Además de la autenticación, cada ruta valida que quien
+llama puede actuar sobre el repositorio (es el operador, o es un médico con una vinculación
+`vigente` y no vencida); crear un repositorio o decidir una vinculación recibida valida además el
+rol (`tipo`) de la cuenta. Ver `S05_S06_A2/revision_seguridad.md` para el detalle y las pruebas
+manuales.
 
 Para probar inicio de sesión local, el OTP de desarrollo es `000000`. El token de verificación de correo y el de recuperación se simulan con el UUID de cuenta. No hay proveedor de correo. Estos valores de prueba no son credenciales seguras.
 
-Los archivos subidos se guardan localmente sin cifrado en esta actividad. La protección de archivos, JWT y reglas de autorización quedan fuera de alcance y deben implementarse antes de exponer la API o usar información real.
+Los archivos subidos se guardan localmente sin cifrado en esta actividad. El cifrado de archivos en reposo queda fuera de alcance.
 
 ## Pruebas de contrato
 
