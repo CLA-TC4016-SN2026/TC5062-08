@@ -36,6 +36,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from src.auth import (
     CurrentAccount,
     create_access_token,
+    medico_document_allowed,
+    medico_document_sql_filter,
     require_repository_access,
     require_repository_operator,
     require_roles,
@@ -701,17 +703,18 @@ def crear_sesion(body: LoginCodeRequest) -> dict[str, Any]:
             text("UPDATE desafios_otp SET usado_en = now() WHERE id = :id"),
             {"id": body.desafioId},
         )
-        connection.execute(
+        session_id = connection.execute(
             text(
                 """
                 INSERT INTO sesiones (cuenta_id, ultima_actividad_en, expira_en)
                 VALUES (:account, now(), now() + interval '720 hours')
+                RETURNING id
                 """
             ),
             {"account": challenge["cuenta_id"]},
-        )
+        ).scalar_one()
     return {
-        "accessToken": create_access_token(challenge["id"], challenge["tipo"]),
+        "accessToken": create_access_token(challenge["id"], challenge["tipo"], session_id),
         "tokenType": "Bearer",
         "usuario": user_response(challenge),
     }
@@ -977,10 +980,7 @@ def listar_documentos(
     if desde and hasta and desde > hasta:
         raise HTTPException(status_code=400, detail=error_body("filtro_invalido", "La fecha inicial no puede ser posterior a la fecha final."))
     with engine.connect() as connection:
-        tier = require_repository_access(connection, repositorioId, current)
-        if tier == "medico":
-            # Un médico solo ve documentos confirmados, sin importar el filtro solicitado.
-            estado = "confirmado"
+        tier, vinculacion_id = require_repository_access(connection, repositorioId, current)
         filters = [
             "repositorio_id = :repo",
             "eliminado_en IS NULL",
@@ -990,6 +990,13 @@ def listar_documentos(
             "limit": tamanoPagina,
             "offset": (pagina - 1) * tamanoPagina,
         }
+        if tier == "medico":
+            # Un médico solo ve documentos confirmados, sin importar el filtro solicitado,
+            # y solo los que caen dentro del alcance de su vinculación.
+            estado = "confirmado"
+            alcance_sql, alcance_params = medico_document_sql_filter(connection, vinculacion_id)
+            filters.append(alcance_sql)
+            params.update(alcance_params)
         if estado:
             filters.append("estado = :state")
             params["state"] = estado
@@ -1021,9 +1028,14 @@ def listar_documentos(
 @app.get(f"{API_PREFIX}/repositorios/{{repositorioId}}/documentos/{{documentoId}}", operation_id="obtenerDocumento", responses={401: {}, 403: {}, 404: {}, 500: {}})
 def obtener_documento(repositorioId: uuid.UUID, documentoId: uuid.UUID, current: CurrentAccount) -> dict[str, Any]:
     with engine.connect() as connection:
-        tier = require_repository_access(connection, repositorioId, current)
+        tier, vinculacion_id = require_repository_access(connection, repositorioId, current)
         document = document_row(connection, repositorioId, documentoId)
-        if tier == "medico" and document["estado"] != "confirmado":
+        if tier == "medico" and (
+            document["estado"] != "confirmado"
+            or not medico_document_allowed(
+                connection, vinculacion_id, documentoId, document["tipo"], document["fechaDocumento"]
+            )
+        ):
             raise HTTPException(status_code=403, detail=error_body("sin_permiso", "No tienes acceso a este documento."))
         return document
 
@@ -1135,9 +1147,14 @@ def confirmar_documento(
 @app.get(f"{API_PREFIX}/repositorios/{{repositorioId}}/documentos/{{documentoId}}/historial-cambios", operation_id="listarHistorialCambios", responses={401: {}, 403: {}, 404: {}, 500: {}})
 def listar_historial_cambios(repositorioId: uuid.UUID, documentoId: uuid.UUID, current: CurrentAccount) -> list[dict[str, Any]]:
     with engine.connect() as connection:
-        tier = require_repository_access(connection, repositorioId, current)
+        tier, vinculacion_id = require_repository_access(connection, repositorioId, current)
         document = document_row(connection, repositorioId, documentoId)
-        if tier == "medico" and document["estado"] != "confirmado":
+        if tier == "medico" and (
+            document["estado"] != "confirmado"
+            or not medico_document_allowed(
+                connection, vinculacion_id, documentoId, document["tipo"], document["fechaDocumento"]
+            )
+        ):
             raise HTTPException(status_code=403, detail=error_body("sin_permiso", "No tienes acceso a este documento."))
         rows = connection.execute(
             text(
@@ -1160,11 +1177,14 @@ def listar_historial_cambios(repositorioId: uuid.UUID, documentoId: uuid.UUID, c
     ]
 
 
-def original_file(connection: Any, repository_id: uuid.UUID, document_id: uuid.UUID) -> tuple[Path, str, str, str]:
+def original_file(
+    connection: Any, repository_id: uuid.UUID, document_id: uuid.UUID
+) -> tuple[Path, str, str, str, str, date | None]:
     row = connection.execute(
         text(
             """
-            SELECT d.nombre_archivo, d.estado, a.clave_almacenamiento, a.tipo_contenido
+            SELECT d.nombre_archivo, d.estado, d.tipo, d.fecha_documento,
+                   a.clave_almacenamiento, a.tipo_contenido
             FROM documentos d JOIN archivos_originales a ON a.documento_id = d.id
             WHERE d.id = :doc AND d.repositorio_id = :repo AND d.eliminado_en IS NULL
             """
@@ -1176,29 +1196,40 @@ def original_file(connection: Any, repository_id: uuid.UUID, document_id: uuid.U
     path = (settings.upload_dir / row["clave_almacenamiento"]).resolve()
     if settings.upload_dir.resolve() not in path.parents or not path.is_file():
         raise HTTPException(status_code=404, detail=error_body("archivo_no_encontrado", "No se encontró el archivo original."))
-    return path, row["tipo_contenido"], row["nombre_archivo"], row["estado"]
+    return path, row["tipo_contenido"], row["nombre_archivo"], row["estado"], row["tipo"], row["fecha_documento"]
 
 
-def _ensure_medico_sees_confirmed(tier: str, estado: str) -> None:
-    if tier == "medico" and estado != "confirmado":
+def _ensure_medico_sees_confirmed(
+    connection: Any,
+    tier: str,
+    vinculacion_id: uuid.UUID | None,
+    documento_id: uuid.UUID,
+    estado: str,
+    tipo_documento: str,
+    fecha_documento: date | None,
+) -> None:
+    if tier == "medico" and (
+        estado != "confirmado"
+        or not medico_document_allowed(connection, vinculacion_id, documento_id, tipo_documento, fecha_documento)
+    ):
         raise HTTPException(status_code=403, detail=error_body("sin_permiso", "No tienes acceso a este documento."))
 
 
 @app.get(f"{API_PREFIX}/repositorios/{{repositorioId}}/documentos/{{documentoId}}/contenido", operation_id="visualizarDocumento", responses={401: {}, 403: {}, 404: {}, 500: {}})
 def visualizar_documento(repositorioId: uuid.UUID, documentoId: uuid.UUID, current: CurrentAccount) -> FileResponse:
     with engine.connect() as connection:
-        tier = require_repository_access(connection, repositorioId, current)
-        path, content_type, filename, estado = original_file(connection, repositorioId, documentoId)
-        _ensure_medico_sees_confirmed(tier, estado)
+        tier, vinculacion_id = require_repository_access(connection, repositorioId, current)
+        path, content_type, filename, estado, tipo, fecha_documento = original_file(connection, repositorioId, documentoId)
+        _ensure_medico_sees_confirmed(connection, tier, vinculacion_id, documentoId, estado, tipo, fecha_documento)
     return FileResponse(path, media_type=content_type, filename=filename, content_disposition_type="inline")
 
 
 @app.get(f"{API_PREFIX}/repositorios/{{repositorioId}}/documentos/{{documentoId}}/archivo", operation_id="descargarArchivoOriginal", responses={401: {}, 403: {}, 404: {}, 500: {}})
 def descargar_archivo_original(repositorioId: uuid.UUID, documentoId: uuid.UUID, current: CurrentAccount) -> FileResponse:
     with engine.connect() as connection:
-        tier = require_repository_access(connection, repositorioId, current)
-        path, content_type, filename, estado = original_file(connection, repositorioId, documentoId)
-        _ensure_medico_sees_confirmed(tier, estado)
+        tier, vinculacion_id = require_repository_access(connection, repositorioId, current)
+        path, content_type, filename, estado, tipo, fecha_documento = original_file(connection, repositorioId, documentoId)
+        _ensure_medico_sees_confirmed(connection, tier, vinculacion_id, documentoId, estado, tipo, fecha_documento)
     return FileResponse(path, media_type=content_type, filename=filename)
 
 
@@ -1254,7 +1285,7 @@ def solicitar_vinculacion(
 @app.get(f"{API_PREFIX}/repositorios/{{repositorioId}}/vinculaciones", operation_id="listarVinculaciones", responses={401: {}, 403: {}, 404: {}, 500: {}})
 def listar_vinculaciones(repositorioId: uuid.UUID, current: CurrentAccount) -> list[dict[str, Any]]:
     with engine.connect() as connection:
-        tier = require_repository_access(connection, repositorioId, current)
+        tier, _ = require_repository_access(connection, repositorioId, current)
         query = "SELECT id FROM vinculaciones WHERE repositorio_id = :repo"
         params: dict[str, Any] = {"repo": repositorioId}
         if tier == "medico":
@@ -1270,7 +1301,7 @@ def listar_vinculaciones(repositorioId: uuid.UUID, current: CurrentAccount) -> l
 @app.get(f"{API_PREFIX}/repositorios/{{repositorioId}}/vinculaciones/{{vinculacionId}}", operation_id="obtenerVinculacion", responses={401: {}, 403: {}, 404: {}, 500: {}})
 def obtener_vinculacion(repositorioId: uuid.UUID, vinculacionId: uuid.UUID, current: CurrentAccount) -> dict[str, Any]:
     with engine.connect() as connection:
-        tier = require_repository_access(connection, repositorioId, current)
+        tier, _ = require_repository_access(connection, repositorioId, current)
         link = link_row(connection, repositorioId, vinculacionId)
         if tier == "medico" and link["medico"]["id"] != str(current["id"]):
             raise HTTPException(status_code=403, detail=error_body("sin_permiso", "Esta vinculación no está dirigida a tu cuenta."))
