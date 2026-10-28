@@ -23,7 +23,7 @@
         "header": [{ "key": "Content-Type", "value": "application/json" }],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"nombre\": \"Paciente Video\",\n  \"correo\": \"{{correo}}\",\n  \"contrasena\": \"Secreta123!\",\n  \"tipoCuenta\": \"paciente\",\n  \"avisoPrivacidadAceptado\": true,\n  \"consentimientoDatosSalud\": true\n}"
+          "raw": "{\n  \"nombre\": \"Paciente Video\",\n  \"correo\": \"paciente.video.{{$timestamp}}@example.com\",\n  \"contrasena\": \"Secreta123!\",\n  \"tipoCuenta\": \"paciente\",\n  \"avisoPrivacidadAceptado\": true,\n  \"consentimientoDatosSalud\": true\n}"
         },
         "url": { "raw": "{{baseUrl}}/cuentas", "host": ["{{baseUrl}}"], "path": ["cuentas"] }
       },
@@ -34,7 +34,8 @@
             "exec": [
               "pm.test('201 Created', () => pm.response.to.have.status(201));",
               "const body = pm.response.json();",
-              "pm.collectionVariables.set('cuentaId', body.id);"
+              "pm.collectionVariables.set('cuentaId', body.id);",
+              "pm.collectionVariables.set('correo', body.correo);"
             ]
           }
         }
@@ -159,7 +160,7 @@
         "header": [{ "key": "Content-Type", "value": "application/json" }],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"nombre\": \"Medico Video\",\n  \"correo\": \"{{medicoCorreo}}\",\n  \"contrasena\": \"Secreta123!\",\n  \"tipoCuenta\": \"medico\",\n  \"avisoPrivacidadAceptado\": true,\n  \"consentimientoDatosSalud\": true\n}"
+          "raw": "{\n  \"nombre\": \"Medico Video\",\n  \"correo\": \"medico.video.{{$timestamp}}@example.com\",\n  \"contrasena\": \"Secreta123!\",\n  \"tipoCuenta\": \"medico\",\n  \"avisoPrivacidadAceptado\": true,\n  \"consentimientoDatosSalud\": true\n}"
         },
         "url": { "raw": "{{baseUrl}}/cuentas", "host": ["{{baseUrl}}"], "path": ["cuentas"] }
       },
@@ -170,7 +171,8 @@
             "exec": [
               "pm.test('201 Created', () => pm.response.to.have.status(201));",
               "const body = pm.response.json();",
-              "pm.collectionVariables.set('medicoCuentaId', body.id);"
+              "pm.collectionVariables.set('medicoCuentaId', body.id);",
+              "pm.collectionVariables.set('medicoCorreo', body.correo);"
             ]
           }
         }
