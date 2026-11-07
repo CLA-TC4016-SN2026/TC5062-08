@@ -1,0 +1,19 @@
+/* Anillo de foco visible también en los campos: Mantine solo cambia el borde de 1px al enfocarlos.
+   El selector es más específico que `.mantine-Input-input:focus`, que anula el contorno. */
+input.mantine-Input-input:focus-visible,
+textarea.mantine-Input-input:focus-visible,
+select.mantine-Input-input:focus-visible {
+  outline: 2px solid var(--mantine-color-blue-8);
+  outline-offset: 2px;
+}
+
+/* El contenedor principal recibe el foco por código (tras cerrar sesión); no es interactivo, no necesita anillo. */
+main:focus {
+  outline: none;
+}
+
+/* Borde de los campos con al menos 3:1 sobre blanco (WCAG 1.4.11). El de Mantine, gray-4 (#ced4da), da 1.5:1.
+   Se excluyen los estados de foco y error para conservar sus colores. */
+[data-mantine-color-scheme='light'] .mantine-Input-input[data-variant='default']:not([data-error]):not(:focus) {
+  --input-bd: #868e96; /* 3.32:1 */
+}
