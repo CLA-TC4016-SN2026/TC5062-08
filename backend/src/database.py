@@ -40,6 +40,7 @@ def assert_database_ready() -> None:
         "busquedas",
         "resultados_busqueda",
         "documentos_indice_semantico",
+        "claves_idempotencia",
     }
     try:
         with engine.connect() as connection:

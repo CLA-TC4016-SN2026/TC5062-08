@@ -3,13 +3,16 @@ from __future__ import annotations
 import hashlib
 import hmac
 import io
+import json
 import logging
+import math
 import secrets
 import uuid
 import zipfile
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import unquote
 from functools import lru_cache
 from typing import Annotated, Any, Literal
 
@@ -26,6 +29,7 @@ from fastapi import (
     UploadFile,
     status,
 )
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, StringConstraints
@@ -53,6 +57,8 @@ logger = logging.getLogger("repossalud.api")
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     assert_database_ready()
+    with engine.begin() as connection:
+        connection.execute(text("DELETE FROM claves_idempotencia WHERE expira_en <= now()"))
     yield
 
 
@@ -91,6 +97,7 @@ ALLOWED_CONTENT_TYPES = {
     "application/pdf": "pdf",
 }
 DEV_OTP_CODE = "000000"
+LOCKOUT_MINUTES = 15
 
 
 @lru_cache(maxsize=1)
@@ -602,9 +609,90 @@ def verificar_correo(body: VerifyEmailRequest) -> dict[str, Any]:
     return user_response(row)
 
 
+def idempotency_fingerprint(*parts: str) -> str:
+    """Huella de lo que define "la misma petición" para una clave de idempotencia."""
+    return hashlib.sha256("\x1f".join(parts).encode()).hexdigest()
+
+
+def claim_idempotency_key(
+    connection: Any, account_id: Any, operation: str, key: uuid.UUID | None, fingerprint: str
+) -> dict[str, Any] | None:
+    """Reclama la clave dentro de la transacción que crea el recurso.
+
+    Devuelve None si la petición debe ejecutarse (sin clave, o clave nueva), y la respuesta original si es un
+    reintento idéntico. Con la misma clave y otra petición responde 400. Si la transacción falla, el rollback
+    libera la clave. Dos peticiones simultáneas con la misma clave se serializan en el índice único.
+    """
+    if key is None:
+        return None
+    params = {"account": account_id, "operation": operation, "key": key}
+    for _ in range(2):
+        claimed = connection.execute(
+            text(
+                """
+                INSERT INTO claves_idempotencia (cuenta_id, operacion, clave, huella_peticion)
+                VALUES (:account, :operation, :key, :fingerprint)
+                ON CONFLICT DO NOTHING RETURNING 1
+                """
+            ),
+            {**params, "fingerprint": fingerprint},
+        ).first()
+        if claimed:
+            return None
+        row = connection.execute(
+            text(
+                """
+                SELECT huella_peticion, respuesta_cuerpo, expira_en <= now() AS expirada
+                FROM claves_idempotencia
+                WHERE cuenta_id = :account AND operacion = :operation AND clave = :key
+                """
+            ),
+            params,
+        ).mappings().first()
+        if row is None:
+            continue
+        if row["expirada"]:
+            connection.execute(
+                text(
+                    "DELETE FROM claves_idempotencia WHERE cuenta_id = :account AND operacion = :operation "
+                    "AND clave = :key AND expira_en <= now()"
+                ),
+                params,
+            )
+            continue
+        if row["huella_peticion"] != fingerprint:
+            raise HTTPException(
+                status_code=400,
+                detail=error_body("idempotencia_conflicto", "La clave de idempotencia ya se usó con una petición distinta."),
+            )
+        return row["respuesta_cuerpo"]
+    raise HTTPException(status_code=500, detail=error_body("error_interno", "Ocurrió un error interno."))
+
+
+def store_idempotent_response(
+    connection: Any, account_id: Any, operation: str, key: uuid.UUID | None, status_code: int, body: dict[str, Any]
+) -> dict[str, Any]:
+    if key is not None:
+        connection.execute(
+            text(
+                "UPDATE claves_idempotencia SET respuesta_estado = :status, respuesta_cuerpo = CAST(:body AS jsonb) "
+                "WHERE cuenta_id = :account AND operacion = :operation AND clave = :key"
+            ),
+            {
+                "status": status_code,
+                "body": json.dumps(jsonable_encoder(body)),
+                "account": account_id,
+                "operation": operation,
+                "key": key,
+            },
+        )
+    return body
+
+
 @app.post(f"{API_PREFIX}/auth/desafios", status_code=201, operation_id="solicitarDesafioCodigo", responses={400: {}, 401: {}, 429: {}, 500: {}, 503: {}})
 def solicitar_desafio(body: LoginRequest) -> dict[str, Any]:
     failure: tuple[int, dict[str, str]] | None = None
+    retry_after: int | None = None
     challenge_id: Any = None
     with engine.begin() as connection:
         account = connection.execute(
@@ -618,6 +706,7 @@ def solicitar_desafio(body: LoginRequest) -> dict[str, Any]:
             failure = (401, error_body("credenciales_invalidas", "Correo o contraseña incorrectos"))
         elif account["bloqueada_hasta"] and account["bloqueada_hasta"] > now_utc():
             failure = (429, error_body("cuenta_bloqueada", "La cuenta está bloqueada temporalmente."))
+            retry_after = max(1, math.ceil((account["bloqueada_hasta"] - now_utc()).total_seconds()))
         elif account["bloqueada_hasta"] and account["bloqueada_hasta"] <= now_utc():
             connection.execute(
                 text(
@@ -639,16 +728,17 @@ def solicitar_desafio(body: LoginRequest) -> dict[str, Any]:
                         intentos_contrasena_fallidos = :attempts,
                         bloqueada_desde = CASE WHEN :attempts = 5 THEN now() ELSE NULL END,
                         bloqueada_hasta = CASE
-                            WHEN :attempts = 5 THEN now() + interval '15 minutes'
+                            WHEN :attempts = 5 THEN now() + make_interval(mins => :lockout)
                             ELSE NULL
                         END
                     WHERE id = :id
                     """
                 ),
-                {"attempts": failed_attempts, "id": account["id"]},
+                {"attempts": failed_attempts, "lockout": LOCKOUT_MINUTES, "id": account["id"]},
             )
             if failed_attempts >= 5:
                 failure = (429, error_body("cuenta_bloqueada", "La cuenta está bloqueada temporalmente."))
+                retry_after = LOCKOUT_MINUTES * 60
             else:
                 failure = (401, error_body("credenciales_invalidas", "Correo o contraseña incorrectos"))
         elif account is not None and failure is None:
@@ -673,7 +763,8 @@ def solicitar_desafio(body: LoginRequest) -> dict[str, Any]:
                     {"account": account["id"], "code": hash_secret(DEV_OTP_CODE)},
                 ).mappings().one()
     if failure is not None:
-        raise HTTPException(status_code=failure[0], detail=failure[1])
+        headers = {"Retry-After": str(retry_after)} if retry_after is not None else None
+        raise HTTPException(status_code=failure[0], detail=failure[1], headers=headers)
     logger.info("Development OTP for challenge %s is %s", challenge_id["id"], DEV_OTP_CODE)
     return {"desafioId": str(challenge_id["id"]), "venceEn": challenge_id["expira_en"].isoformat()}
 
@@ -876,7 +967,8 @@ def eliminar_historial(
         ).mappings().first()
         if repository is None:
             raise HTTPException(status_code=404, detail=error_body("repositorio_no_encontrado", "No se encontró el repositorio."))
-        if confirmacion_nombre != repository["nombre_completo"]:
+        # El cliente codifica el nombre con percent-encoding porque los encabezados HTTP solo admiten ASCII (contrato).
+        if unquote(confirmacion_nombre) != repository["nombre_completo"]:
             raise HTTPException(status_code=400, detail=error_body("confirmacion_invalida", "El nombre de confirmación no coincide con el titular."))
         connection.execute(
             text(
@@ -906,7 +998,7 @@ async def subir_documento(
     repositorioId: uuid.UUID,
     current: CurrentAccount,
     archivo: UploadFile = File(...),
-    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+    idempotency_key: Annotated[uuid.UUID | None, Header(alias="Idempotency-Key")] = None,
 ) -> dict[str, Any]:
     content_type = archivo.content_type or ""
     if content_type not in ALLOWED_CONTENT_TYPES:
@@ -917,14 +1009,22 @@ async def subir_documento(
     if not payload:
         raise HTTPException(status_code=400, detail=error_body("archivo_vacio", "El archivo está vacío."))
 
-    settings.upload_dir.mkdir(parents=True, exist_ok=True)
     storage_key = f"{uuid.uuid4().hex}.{ALLOWED_CONTENT_TYPES[content_type]}"
     storage_path = settings.upload_dir / storage_key
-    storage_path.write_bytes(payload)
     digest = hashlib.sha256(payload).hexdigest()
+    file_name = Path(archivo.filename or "documento").name
     try:
         with engine.begin() as connection:
             require_repository_operator(connection, repositorioId, current)
+            replay = claim_idempotency_key(
+                connection, current["id"], "subirDocumento", idempotency_key,
+                idempotency_fingerprint(str(repositorioId), file_name, content_type, digest),
+            )
+            if replay is not None:
+                return replay
+            # El archivo se escribe solo si la petición se va a ejecutar, para que un reintento no deje huérfanos.
+            settings.upload_dir.mkdir(parents=True, exist_ok=True)
+            storage_path.write_bytes(payload)
             document_id = connection.execute(
                 text(
                     """
@@ -937,7 +1037,7 @@ async def subir_documento(
                 ),
                 {
                     "repo": repositorioId,
-                    "name": Path(archivo.filename or "documento").name,
+                    "name": file_name,
                     "format": ALLOWED_CONTENT_TYPES[content_type],
                     "size": len(payload),
                     "hash": digest,
@@ -960,6 +1060,7 @@ async def subir_documento(
                 {"doc": document_id},
             )
             result = document_row(connection, repositorioId, document_id)
+            store_idempotent_response(connection, current["id"], "subirDocumento", idempotency_key, 201, result)
     except Exception:
         storage_path.unlink(missing_ok=True)
         raise
@@ -1238,10 +1339,20 @@ def solicitar_vinculacion(
     repositorioId: uuid.UUID,
     body: LinkCreateRequest,
     current: CurrentAccount,
-    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+    idempotency_key: Annotated[uuid.UUID | None, Header(alias="Idempotency-Key")] = None,
 ) -> dict[str, Any]:
     with engine.begin() as connection:
         require_repository_operator(connection, repositorioId, current)
+        replay = claim_idempotency_key(
+            connection, current["id"], "solicitarVinculacion", idempotency_key,
+            idempotency_fingerprint(
+                str(repositorioId),
+                str(body.correoMedico).lower(),
+                json.dumps(body.model_dump(mode="json", exclude={"correoMedico"}), sort_keys=True),
+            ),
+        )
+        if replay is not None:
+            return replay
         doctor = connection.execute(
             text("SELECT id FROM cuentas WHERE lower(correo) = :email AND tipo = 'medico'"),
             {"email": str(body.correoMedico).lower()},
@@ -1279,7 +1390,8 @@ def solicitar_vinculacion(
             },
         ).scalar_one()
         insert_scope(connection, link_id, repositorioId, body.alcance)
-        return link_row(connection, repositorioId, link_id)
+        result = link_row(connection, repositorioId, link_id)
+        return store_idempotent_response(connection, current["id"], "solicitarVinculacion", idempotency_key, 201, result)
 
 
 @app.get(f"{API_PREFIX}/repositorios/{{repositorioId}}/vinculaciones", operation_id="listarVinculaciones", responses={401: {}, 403: {}, 404: {}, 500: {}})
