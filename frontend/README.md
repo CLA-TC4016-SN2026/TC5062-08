@@ -17,9 +17,11 @@ La app queda en http://localhost:5173. En desarrollo, las peticiones a `/api` pa
 - `npm run dev`: servidor de desarrollo.
 - `npm run build`: comprobación de tipos y build de producción.
 - `npm run gen:api`: regenera `src/services/api-types.ts` desde `../S05_S06_A1/openapi_equipo.yaml`.
+- `npm test`: pruebas unitarias de la capa de servicios, con `fetch` simulado. No necesitan backend.
+- `npm run test:integration`: las mismas operaciones contra un backend real (`BACKEND_URL`, por defecto `http://localhost:8000/api/v1`). Crea cuentas y documentos de prueba: úsalo solo con una base de datos desechable.
 
 ## Estructura
 
 - `src/components`: componentes reutilizables.
 - `src/pages`: una página por ruta.
-- `src/services`: cliente de API tipado, sesión y llamadas al backend.
+- `src/services`: capa de servicios. `apiClient.ts` es el único lugar que toca las peticiones: agrega el JWT y convierte los errores HTTP y de red en `ApiError` y `NetworkError` (`errors.ts`). Hay un módulo por recurso (`authService`, `repositorioService`, `documentoService`, `vinculacionService`, `busquedaService`) y los componentes los importan desde `services/index.ts`. Para mostrar un error al usuario se usa `getErrorMessage(error)`.

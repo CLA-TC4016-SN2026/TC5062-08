@@ -1,6 +1,7 @@
 import { Alert, Stack, Text, Title } from '@mantine/core'
 import { useQuery } from '@tanstack/react-query'
 import { AppButton } from '../components/AppButton'
+import { getErrorMessage } from '../services/errors'
 import { fetchHealth } from '../services/health'
 
 export function HomePage() {
@@ -27,7 +28,7 @@ export function HomePage() {
       )}
       {health.isError && (
         <Alert color="yellow" title="Backend no disponible">
-          {health.error.message}. Levanta el backend con uvicorn y vuelve a probar.
+          {getErrorMessage(health.error)} Levanta el backend con uvicorn y vuelve a probar.
         </Alert>
       )}
     </Stack>

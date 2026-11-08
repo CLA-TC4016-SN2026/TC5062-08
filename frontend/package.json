@@ -8,7 +8,9 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "gen:api": "openapi-typescript ../S05_S06_A1/openapi_equipo.yaml -o src/services/api-types.ts"
+    "gen:api": "openapi-typescript ../S05_S06_A1/openapi_equipo.yaml -o src/services/api-types.ts",
+    "test": "vitest run",
+    "test:integration": "BACKEND_URL=${BACKEND_URL:-http://localhost:8000/api/v1} vitest run src/services/backend.integration.test.ts"
   },
   "dependencies": {
     "@mantine/core": "^8.3.18",
@@ -27,6 +29,7 @@
     "openapi-typescript": "^7.13.0",
     "oxlint": "^1.88.0",
     "typescript": "^5.9.3",
-    "vite": "^8.3.4"
+    "vite": "^8.3.4",
+    "vitest": "^5.0.5"
   }
 }

@@ -5,6 +5,8 @@ import { Navbar } from './Navbar'
 
 const NAV_LINKS = [
   { label: 'Inicio', to: '/', public: true },
+  { label: 'Mi panel', to: '/panel' },
+  { label: 'Mis documentos', to: '/documentos' },
   // Enlace temporal a la página de muestra de componentes; se quita cuando existan las pantallas reales.
   { label: 'Componentes', to: '/componentes', public: true },
 ]

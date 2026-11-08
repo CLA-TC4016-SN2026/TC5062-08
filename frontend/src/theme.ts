@@ -16,6 +16,10 @@ export const cssVariablesResolver: CSSVariablesResolver = () => ({
     '--mantine-color-dimmed': '#5c636a', // 6.09:1
     '--mantine-color-placeholder': '#5c636a', // 6.09:1
     '--mantine-color-error': '#c92a2a', // 5.46:1
+    // Título de las alertas (variante light, sobre su fondo tintado). Con los de Mantine miden 3.89:1, 2.28:1 y 3.08:1.
+    '--mantine-color-red-light-color': '#c92a2a', // 4.70:1
+    '--mantine-color-yellow-light-color': '#995200', // 5.42:1
+    '--mantine-color-green-light-color': '#237032', // 5.46:1
   },
   dark: {},
 })

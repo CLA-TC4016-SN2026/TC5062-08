@@ -1,4 +1,5 @@
-import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { setUnauthorizedHandler } from '../services/apiClient'
 import { clearSession, getToken, getUser, saveSession, type SessionUser } from '../services/session'
 
 interface AuthState {
@@ -23,6 +24,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     clearSession()
     setUser(null)
   }, [])
+
+  // Si la API rechaza el token de una sesión iniciada (venció o se revocó), se cierra la sesión local.
+  useEffect(() => {
+    setUnauthorizedHandler(logout)
+    return () => setUnauthorizedHandler(null)
+  }, [logout])
 
   const value = useMemo(
     () => ({ isAuthenticated: user !== null, user, login, logout }),

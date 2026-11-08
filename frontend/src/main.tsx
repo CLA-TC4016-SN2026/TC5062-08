@@ -9,7 +9,10 @@ import App from './App'
 import { AuthProvider } from './context/AuthContext'
 import { cssVariablesResolver, theme } from './theme'
 
-const queryClient = new QueryClient()
+// Con el modo por defecto ('online') TanStack Query no lanza la petición si el navegador indica que no hay red: la deja
+// en pausa y la pantalla se queda cargando sin avisar. Con 'always' la petición se intenta y falla como NetworkError,
+// que es lo que las pantallas saben mostrar ("No se pudo conectar con el servidor…").
+const queryClient = new QueryClient({ defaultOptions: { queries: { networkMode: 'always' } } })
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
